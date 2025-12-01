@@ -205,22 +205,21 @@ threading.Thread(target=timeout_worker, daemon=True).start()
 
 # ==================== Поиск последней активной записи ====================
 def find_last_active_record(ws, user_repr):
-    try:
-        values = ws.get_all_values()
-        if len(values) <= 1:
-            return None, None
-        for i in range(len(values)-1, 0, -1):
-            row = values[i]
-            if len(row) < 9:
-                continue
-            user_col = row[8].strip()
-            status = row[10].strip() if len(row) > 10 else row[9].strip() if len(row) > 9 else ""
-            if user_col == user_repr and status != "ОТМЕНЕНО":
-                return row, i+1
-        return None, None
-    except Exception as e:
-        log.exception("Ошибка поиска записи")
-        return None, None
+    values = ws.get_all_values()
+    if ws.title == "Брак":
+        user_col = 7   # row[7] — пользователь
+        status_col = 9 # row[9] — статус
+    else:
+        user_col = 8   # row[8] — пользователь (Старт/Стоп)
+        status_col = 10 # row[10] — статус
+
+    for i in range(len(values)-1, 0, -1):
+        row = values[i]
+        if len(row) <= user_col:
+            continue
+        if row[user_col].strip() == user_repr and (len(row) <= status_col or row[status_col].strip() != "ОТМЕНЕНО"):
+            return row, i+1
+    return None, None
 
 # ==================== Основная логика ====================
 def process(uid, chat, text, user_repr):

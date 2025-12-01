@@ -192,36 +192,6 @@ def send(chat_id, text, markup=None):
     except Exception as e:
         log.exception(f"send error: {e}")
 
-# ==================== Поиск последней записи пользователя в конкретном листе ====================
-def find_last_user_entry(uid, worksheet):
-    try:
-        values = worksheet.get_all_values()
-        if len(values) <= 1: 
-            return None
-        for i in range(len(values)-1, 0, -1):
-            row = values[i]
-            if len(row) >= 9 and str(uid) in row[8]:  # колонка 9 (индекс 8) — Пользователь
-                if len(row) >= 11 and row[10].strip() == "Удалено":
-                    continue  # пропускаем уже удалённые
-                return i + 1, row  # номер строки и данные
-    except Exception as e:
-        log.error(f"find_last_user_entry error: {e}")
-    return None
-
-# ==================== Пометить как удалено ====================
-def mark_as_deleted(ws, row_index):
-    try:
-        ws.update_cell(row_index, 11, "Удалено")  # колонка Статус
-        row = ws.row_values(row_index)
-        sheet_name = ws.title
-        if sheet_name == "Брак":
-            notify_controllers(controllers_defect, f"ЗАПИСЬ БРАКА УДАЛЕНА\nЛиния {row[2]}\n{row[0]} {row[1]}\nЗНП: <code>{row[4]}</code>\nМетров: {row[5]}")
-        else:
-            action = "Запуск" if row[3] == "запуск" else "Остановка"
-            notify_controllers(controllers_startstop, f"ЗАПИСЬ СТАРТ/СТОП УДАЛЕНА\nЛиния {row[2]}\n{row[0]} {row[1]}\nДействие: {action}\nПричина: {row[4] if len(row)>4 else '—'}")
-    except Exception as e:
-        log.error(f"mark_as_deleted error: {e}")
-
 # ==================== Таймауты ====================
 states = {}
 last_activity = {}
@@ -243,18 +213,6 @@ threading.Thread(target=timeout_worker, daemon=True).start()
 def process(uid, chat, text, user_repr):
     last_activity[uid] = time.time()
 
-    # Подтверждение удаления
-    if states.get(uid, {}).get("step") == "confirm_delete":
-        if text == "Да, удалить":
-            ws = states[uid]["ws"]
-            row_index = states[uid]["row_index"]
-            mark_as_deleted(ws, row_index)
-            send(chat, "Запись помечена как <b>Удалено</b>.", MAIN_KB)
-        else:
-            send(chat, "Запись сохранена.", MAIN_KB)
-        states.pop(uid, None)
-        return
-
     # Возврат назад в главное меню
     if text == "Назад":
         states.pop(uid, None)
@@ -267,82 +225,41 @@ def process(uid, chat, text, user_repr):
             send(chat, "<b>Старт/Стоп</b>\nВыберите действие:", FLOW_MENU_KB)
             states[uid] = {"flow": "startstop", "chat": chat}
             return
-        if text == "Брак":
-            send(chat, "<b>Брак</b>\nВыберите действие:", FLOW_MENU_KB)
-            states[uid] = {"flow": "defect", "chat": chat}
-            return
-        send(chat, "Выберите действие:", MAIN_KB)
-        return
-
     flow = states[uid]["flow"]
 
-# === Обработка подменю: Новая запись / Отменить последнюю запись ===
-    if states[uid].get("awaiting_flow_choice") is not True:
-        if text == "Новая запись":
-            states[uid]["awaiting_flow_choice"] = True
-
-            if flow == "defect":
-                records = get_last_records(ws_defect, 2)
-                msg = "<b>Последние записи Брака:</b>\n\n"
-                if not records:
-                    msg += "Нет записей."
-                else:
-                    for r in records:
-                        znp = r[4] if len(r)>4 else "—"
-                        meters = r[5] if len(r)>5 else "—"
-                        defect = r[6] if len(r)>6 else "—"
-                        msg += f"• {r[0]} {r[1]} | Линия {r[2]} | <code>{znp}</code> | {meters}м | {defect}\n"
-                send(chat, msg)
-                states[uid].update({"step": "line", "data": {"action": "брак"}})
+    # === Обработка подменю: только Новая запись ===
+    if text == "Новая запись":
+        if flow == "defect":
+            records = get_last_records(ws_defect, 2)
+            msg = "<b>Последние записи Брака:</b>\n\n"
+            if not records:
+                msg += "Нет записей."
             else:
-                records = get_last_records(ws_startstop, 2)
-                msg = "<b>Последние записи Старт/Стоп:</b>\n\n"
-                if not records:
-                    msg += "Нет записей."
-                else:
-                    for r in records:
-                        action = "Запуск" if r[3] == "запуск" else "Остановка"
-                        reason = r[4] if len(r)>4 else "—"
-                        msg += f"• {r[0]} {r[1]} | Линия {r[2]} | {action} | {reason}\n"
-                send(chat, msg)
-                states[uid].update({"step": "line", "data": {}})
-            send(chat, "Введите номер линии (1–15):", CANCEL_KB)
-            return
-
-        if text == "Отменить последнюю запись":
-            ws = ws_defect if flow == "defect" else ws_startstop
-            result = find_last_user_entry(uid, ws)
-
-            if not result:
-                send(chat, "У вас нет активных записей в этом разделе.", FLOW_MENU_KB)
-                return
-
-            row_index, row = result
-            action_ru = "Брак" if flow == "defect" else ("Запуск" if len(row)>3 and row[3]=="запуск" else "Остановка")
-
-            msg = f"<b>Последняя запись найдена:</b>\n"
-            msg += f"{row[0]} {row[1]} • Линия {row[2]}\n"
-            msg += f"Действие: {action_ru}\n"
-            if flow == "defect":
-                msg += f"ЗНП: <code>{row[4] if len(row)>4 else '—'}</code>\n"
-                msg += f"Брака: {row[5] if len(row)>5 else '—'} м\n"
-                msg += f"Вид: {row[6] if len(row)>6 else '—'}\n"
+                for r in records:
+                    znp = r[4] if len(r)>4 else "—"
+                    meters = r[5] if len(r)>5 else "—"
+                    defect = r[6] if len(r)>6 else "—"
+                    msg += f"• {r[0]} {r[1]} | Линия {r[2]} | <code>{znp}</code> | {meters}м | {defect}\n"
+            send(chat, msg)
+            states[uid].update({"step": "line", "data": {"action": "брак"}})
+        else:
+            records = get_last_records(ws_startstop, 2)
+            msg = "<b>Последние записи Старт/Стоп:</b>\n\n"
+            if not records:
+                msg += "Нет записей."
             else:
-                msg += f"Причина: {row[4] if len(row)>4 else '—'}\n"
-            msg += "\n<b>Удалить эту запись?</b>"
-
-            send(chat, msg, CONFIRM_DELETE_KB)
-            states[uid].update({
-                "step": "confirm_delete",
-                "ws": ws,
-                "row_index": row_index,
-                "awaiting_flow_choice": True
-            })
-            return
-
-        # Если нажали что-то другое — повторяем меню
-        send(chat, "Выберите действие:", FLOW_MENU_KB)
+                for r in records:
+                    action = "Запуск" if r[3] == "запуск" else "Остановка"
+                    reason = r[4] if len(r)>4 else "—"
+                    msg += f"• {r[0]} {r[1]} | Линия {r[2]} | {action} | {reason}\n"
+            send(chat, msg)
+            states[uid].update({"step": "line", "data": {}})
+        send(chat, "Введите номер линии (1–15):", CANCEL_KB)
         return
+
+    # Если нажали что-то другое — повторяем меню
+    send(chat, "Выберите действие:", FLOW_MENU_KB)
+    return
         
     # Отмена в процессе ввода
     if text == "Отмена":

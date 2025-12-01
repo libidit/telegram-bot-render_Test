@@ -523,7 +523,7 @@ LOCK_PATH = "/tmp/bot.lock"
 @app.route("/health")
 def health(): return {"ok": True}
 
-@app.route(f"/webhook/{TELEGRAM_TOKEN}", methods=["POST"])
+@app.route("/", methods=["POST"])
 def webhook():
     upd = request.get_json(silent=True)
     if not upd or "message" not in upd: return {"ok": True}

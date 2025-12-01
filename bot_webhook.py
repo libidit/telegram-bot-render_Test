@@ -2,18 +2,70 @@
 # Всё работает: последние записи, уведомления контролёрам, отмена с подтверждением
 # Изменение: при выборе времени через кнопки к формату чч:мм добавляются текущие секунды (чч:мм:сс).
 import os
-except gspread.exceptions.WorksheetNotFound:
-ws = sh.add_worksheet(title=sheet_name, rows=3000, cols=20)
-if headers and ws.row_values(1) != headers:
-ws.clear()
-ws.insert_row(headers, 1)
-return ws
+import json
+import logging
+import requests
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 
+from flask import Flask, request
+import gspread
+from google.oauth2 import service_account
+from filelock import FileLock
+
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("bot")
+
+# ==================== ENV ====================
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
+
+if not all([TELEGRAM_TOKEN, SPREADSHEET_ID, GOOGLE_CREDS_JSON]):
+    raise RuntimeError("Missing required env vars")
+
+creds_dict = json.loads(GOOGLE_CREDS_JSON)
+creds = service_account.Credentials.from_service_account_info(
+    creds_dict,
+    scopes=[
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+)
+gc = gspread.authorize(creds)
+sh = gc.open_by_key(SPREADSHEET_ID)
+
+# ==================== Московское время ====================
+MSK = timezone(timedelta(hours=3))
+def now_msk():
+    return datetime.now(MSK)
+
+# ==================== Листы и заголовки ====================
+STARTSTOP_SHEET = "Старт-Стоп"
+DEFECT_SHEET = "Брак"
+CTRL_STARTSTOP_SHEET = "Контр_Старт-Стоп"
+CTRL_DEFECT_SHEET = "Контр_Брак"
+
+HEADERS_STARTSTOP = ["Дата","Время","Номер линии","Действие","Причина","ЗНП","Метров брака","Вид брака","Пользователь","Время отправки","Статус"]
+HEADERS_DEFECT    = ["Дата","Время","Номер линии","Действие","ЗНП","Метров брака","Вид брака","Пользователь","Время отправки","Статус"]
+
+def get_ws(sheet_name, headers=None):
+    try:
+        ws = sh.worksheet(sheet_name)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sh.add_worksheet(title=sheet_name, rows=3000, cols=20)
+    
+    if headers and ws.row_values(1) != headers:
+        ws.clear()
+        ws.insert_row(headers, 1)
+    
+    return ws
 
 ws_startstop = get_ws(STARTSTOP_SHEET, HEADERS_STARTSTOP)
-ws_defect = get_ws(DEFECT_SHEET, HEADERS_DEFECT)
-ws_ctrl_ss = get_ws(CTRL_STARTSTOP_SHEET)
-ws_ctrl_def = get_ws(CTRL_DEFECT_SHEET)
+ws_defect    = get_ws(DEFECT_SHEET,    HEADERS_DEFECT)
+ws_ctrl_ss   = get_ws(CTRL_STARTSTOP_SHEET)
+ws_ctrl_def  = get_ws(CTRL_DEFECT_SHEET)
 
 
 # ==================== Контролёры ====================

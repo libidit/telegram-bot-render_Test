@@ -145,21 +145,33 @@ def append_row(data):
                f"Причина: {data.get('reason','—')}")
         notify_controllers(controllers_startstop, msg)
 
-# ==================== Поиск последней записи пользователя ====================
-def find_last_entry(uid):
-    user_col = 9
-    ts_col = 10
-    for ws, name in [(ws_startstop, "Старт-Стоп"), (ws_defect, "Брак")]:
-        try:
-            values = ws.get_all_values()
-            for i in range(len(values)-1, 0, -1):
-                row = values[i]
-                if len(row) >= user_col and str(uid) in row[user_col-1]:
-                    return True, name, row, ws, i + 1
-        except Exception as e:
-            log.error(f"find_last_entry error: {e}")
-    return False, None, None, None, None
+# ==================== Поиск последней записи пользователя в конкретном листе ====================
+def find_last_user_entry(uid, worksheet):
+    try:
+        values = worksheet.get_all_values()
+        if len(values) <= 1:
+            return None
 
+        header = values[0]
+        try:
+            user_col_index = header.index("Пользователь")  # находим колонку по названию
+        except ValueError:
+            log.error(f"Колонка 'Пользователь' не найдена в листе {worksheet.title}")
+            return None
+
+        for i in range(len(values)-1, 0, -1):
+            row = values[i]
+            if len(row) > user_col_index and str(uid) in row[user_col_index]:
+                # Проверяем статус "Удалено" (если колонка существует)
+                status = row[10] if len(row) > 10 else ""
+                if status.strip() == "Удалено":
+                    continue
+                return i + 1, row
+        return None
+    except Exception as e:
+        log.error(f"find_last_user_entry error: {e}")
+        return None
+        
 # ==================== Пометить как "Удалено" + уведомление ====================
 def mark_as_deleted(ws, row_index):
     try:

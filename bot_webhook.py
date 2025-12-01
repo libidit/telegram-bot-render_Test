@@ -373,21 +373,24 @@ def process(uid, chat, text, user_repr):
     flow = states[uid]["flow"]
 
 # Обработка подменю (первое нажатие)
-    if states[uid].get("awaiting_flow_choice") is None:
-        if text == "Новая запись":
-            states[uid]["awaiting_flow_choice"] = True
-            if flow == "defect":
-                records = get_last_records(ws_defect, 2)
-                msg = "<b>Последние записи Брака:</b>\n\n"
-                if not records:
-                    msg += "Нет записей."
-                else:
-                    for r in records:
-                        znp = r[4] if len(r)>4 else "—"
-                        meters = r[5] if len(r)>5 else "—"
-                        defect = r[6] if len(r)>6 else "—"
-                        msg += f"• {r[0]} {r[1]} | Линия {r[2]} | <code>{znp}</code> | {meters}м | {defect}\n"
-                send(chat, msg)
+if states[uid].get("awaiting_flow_choice") is None:
+    if text == "Новая запись":
+        states[uid]["awaiting_flow_choice"] = True
+        if flow == "defect":
+            records = get_last_records(ws_defect, 2)
+            msg = "<b>Последние записи Брака:</b>\n\n"
+            if not records:
+                msg += "Нет записей."
+            else:
+                for r in records:
+                    znp = r[4] if len(r) > 4 else "—"
+                    meters = r[5] if len(r) > 5 else "—"
+                    defect = r[6] if len(r) > 6 else "—"
+                    msg += (
+                        f"• {r[0]} {r[1]} | Линия {r[2]} "
+                        f"| <code>{znp}</code> | {meters}м | {defect}\n"
+                    )
+            send(chat, msg)
                 states[uid].update({"step": "line", "data": {"action": "брак"}})
             else:
                 records = get_last_records(ws_startstop, 2)

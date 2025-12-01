@@ -219,12 +219,21 @@ def process(uid, chat, text, user_repr):
         send(chat, "Главное меню:", MAIN_KB)
         return
 
-    # Выбор потока
+# === ВЫБОР ПОТОКА: Старт/Стоп или Брак ===
     if uid not in states:
         if text in ("/start", "Старт/Стоп"):
             send(chat, "<b>Старт/Стоп</b>\nВыберите действие:", FLOW_MENU_KB)
-            states[uid] = {"flow": "startstop", "chat": chat}
+            states[uid] = {"flow": "startstop", "chat": chat, "step": None, "data": {}}
             return
+        elif text == "Брак":
+            send(chat, "<b>Брак</b>\nВыберите действие:", FLOW_MENU_KB)
+            states[uid] = {"flow": "defect", "chat": chat, "step": None, "data": {}}
+            return
+        else:
+            send(chat, "Выберите действие:", MAIN_KB)
+            return
+
+    # Если мы здесь — значит пользователь уже выбрал раздел (Старт/Стоп или Брак)
     flow = states[uid]["flow"]
 
     # === Обработка подменю: только Новая запись ===

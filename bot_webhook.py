@@ -145,87 +145,62 @@ def append_row(data):
                f"Причина: {data.get('reason','—')}")
         notify_controllers(controllers_startstop, msg)
 
-# ==================== Поиск последней записи пользователя в конкретном листе ====================
+# ==================== Поиск последней записи пользователя (ОДНА ЕДИНСТВЕННАЯ ФУНКЦИЯ) ====================
 def find_last_user_entry(uid, worksheet):
+    """Ищет последнюю НЕудалённую запись пользователя в указанном листе"""
     try:
         values = worksheet.get_all_values()
         if len(values) <= 1:
-            log.info(f"[{worksheet.title}] Нет строк")
             return None
 
         header = values[0]
-        # ищем индекс колонки 'Пользователь' и 'Статус' по заголовку (без чувствительности к регистру)
-        user_col_index = None
-        status_col_index = None
-        for idx, h in enumerate(header):
-            hn = (h or "").strip().lower()
-            if user_col_index is None and "пользователь" in hn:
-                user_col_index = idx
-            if status_col_index is None and "статус" in hn:
-                status_col_index = idx
-
-        if user_col_index is None:
-            log.error(f"[{worksheet.title}] Колонка 'Пользователь' не найдена в заголовке: {header}")
+        try:
+            user_col_idx = header.index("Пользователь")
+        except ValueError:
+            log.error(f"Колонка 'Пользователь' не найдена в листе {worksheet.title}")
             return None
 
-        # пробегаем снизу вверх, ищем строку где в колонке пользователь содержится uid
-        for i in range(len(values)-1, 0, -1):
+        for i in range(len(values) - 1, 0, -1):
             row = values[i]
-            # защитная проверка длины
-            if len(row) <= user_col_index:
+            if len(row) <= user_col_idx:
                 continue
-            cell = row[user_col_index]
-            if str(uid) in cell:
-                # проверяем статус (если есть колонка Статус)
-                if status_col_index is not None and len(row) > status_col_index:
-                    if row[status_col_index].strip().lower() == "удалено":
-                        log.info(f"[{worksheet.title}] Строка {i+1} пропущена (Удалено)")
-                        continue
-                # возвращаем 1-based индекс строки и саму строку
-                log.info(f"[{worksheet.title}] Найдена строка {i+1} для uid {uid}")
+            user_cell = row[user_col_idx].strip()
+            if str(uid) in user_cell or (user_cell.startswith(str(uid) + " ") or user_cell == str(uid)):
+                # Проверяем статус "Удалено" (колонка 11, индекс 10)
+                status = row[10].strip() if len(row) > 10 else ""
+                if status == "Удалено":
+                    continue
                 return i + 1, row
-        log.info(f"[{worksheet.title}] Активных записей для uid {uid} не найдено")
+
         return None
     except Exception as e:
         log.error(f"find_last_user_entry error ({worksheet.title}): {e}")
         return None
         
-# ==================== Пометить как "Удалено" + уведомление ====================
+# ==================== Пометить как удалено (ОДНА ЕДИНСТВЕННАЯ ФУНКЦИЯ) ====================
 def mark_as_deleted(ws, row_index):
     try:
-        header = ws.row_values(1)
-        # ищем колонку 'Статус' (1-based номер столбца для update_cell)
-        status_col = None
-        for idx, h in enumerate(header):
-            if (h or "").strip().lower().find("статус") != -1:
-                status_col = idx + 1
-                break
-        if status_col is None:
-            # fallback — колонка 11 (раньше использовалась в коде), но лучше логировать
-            status_col = 11
-            log.warning(f"[{ws.title}] Колонка 'Статус' не найдена, используем fallback col {status_col}")
-
-        ws.update_cell(row_index, status_col, "Удалено")
-
+        ws.update_cell(row_index, 11, "Удалено")
         row = ws.row_values(row_index)
-        # безопасные извлечения полей
-        date = row[0] if len(row) > 0 else "—"
-        time_ = row[1] if len(row) > 1 else "—"
-        line = row[2] if len(row) > 2 else "—"
-        # для Брака: ЗНП index 4, метры index 5, вид index 6, для старт/стоп: действие index 3, причина index 4
         sheet_name = ws.title
-        if sheet_name == DEFECT_SHEET or sheet_name.lower().find("брак") != -1:
-            znp = row[4] if len(row) > 4 else "—"
-            meters = row[5] if len(row) > 5 else "—"
-            notify_controllers(controllers_defect,
-                               f"ЗАПИСЬ БРАКА УДАЛЕНА\nЛиния: {line}\n{date} {time_}\nЗНП: <code>{znp}</code>\nМетров: {meters}")
+
+        if sheet_name == "Брак":
+            msg = (f"ЗАПИСЬ БРАКА УДАЛЕНА\n"
+                   f"Линия {row[2]}\n"
+                   f"{row[0]} {row[1]}\n"
+                   f"ЗНП: <code>{row[4] if len(row)>4 else '—'}</code>\n"
+                   f"Метров: {row[5] if len(row)>5 else '—'}")
+            notify_controllers(controllers_defect, msg)
         else:
-            action = "Запуск" if (len(row) > 3 and row[3] == "запуск") else "Остановка"
-            reason = row[4] if len(row) > 4 else "—"
-            notify_controllers(controllers_startstop,
-                               f"ЗАПИСЬ СТАРТ/СТОП УДАЛЕНА\nЛиния: {line}\n{date} {time_}\nДействие: {action}\nПричина: {reason}")
+            action = "Запуск" if len(row)>3 and row[3] == "запуск" else "Остановка"
+            msg = (f"ЗАПИСЬ СТАРТ/СТОП УДАЛЕНА\n"
+                   f"Линия {row[2]}\n"
+                   f"{row[0]} {row[1]}\n"
+                   f"Действие: {action}\n"
+                   f"Причина: {row[4] if len(row)>4 else '—'}")
+            notify_controllers(controllers_startstop, msg)
     except Exception as e:
-        log.error(f"mark_as_deleted error ({ws.title}): {e}")
+        log.error(f"mark_as_deleted error: {e}")
 
 # ==================== Клавиатуры ====================
 def keyboard(rows):
@@ -372,67 +347,73 @@ def process(uid, chat, text, user_repr):
 
     flow = states[uid]["flow"]
 
-# Обработка подменю (первое нажатие)
-if states[uid].get("awaiting_flow_choice") is None:
-    if text == "Новая запись":
-        states[uid]["awaiting_flow_choice"] = True
-        if flow == "defect":
-            records = get_last_records(ws_defect, 2)
-            msg = "<b>Последние записи Брака:</b>\n\n"
-            if not records:
-                msg += "Нет записей."
+# === Обработка подменю: Новая запись / Отменить последнюю запись ===
+    if states[uid].get("awaiting_flow_choice") is not True:
+        if text == "Новая запись":
+            states[uid]["awaiting_flow_choice"] = True
+
+            if flow == "defect":
+                records = get_last_records(ws_defect, 2)
+                msg = "<b>Последние записи Брака:</b>\n\n"
+                if not records:
+                    msg += "Нет записей."
+                else:
+                    for r in records:
+                        znp = r[4] if len(r)>4 else "—"
+                        meters = r[5] if len(r)>5 else "—"
+                        defect = r[6] if len(r)>6 else "—"
+                        msg += f"• {r[0]} {r[1]} | Линия {r[2]} | <code>{znp}</code> | {meters}м | {defect}\n"
+                send(chat, msg)
+                states[uid].update({"step": "line", "data": {"action": "брак"}})
             else:
-                for r in records:
-                    znp = r[4] if len(r) > 4 else "—"
-                    meters = r[5] if len(r) > 5 else "—"
-                    defect = r[6] if len(r) > 6 else "—"
-                    msg += (
-                        f"• {r[0]} {r[1]} | Линия {r[2]} "
-                        f"| <code>{znp}</code> | {meters}м | {defect}\n"
-                    )
-            send(chat, msg)
-                states[uid].update({"step": "line", "data": {"action": "брак"}})
-            else:
-                records = get_last_records(ws_startstop, 2)
-                msg = "<b>Последние записи Старт/Стоп:</b>\n\n"
-                if not records:
-                    msg += "Нет записей."
-                else:
-                    for r in records:
-                        action = "Запуск" if r[3] == "запуск" else "Остановка"
-                        reason = r[4] if len(r)>4 else "—"
-                        msg += f"• {r[0]} {r[1]} | Линия {r[2]} | {action} | {reason}\n"
-                send(chat, msg)
-                states[uid].update({"step": "line", "data": {}})
-            send(chat, "Введите номер линии (1–15):", CANCEL_KB)
-            return
-        if text == "Отменить последнюю запись":
-            ws = ws_defect if flow == "defect" else ws_startstop
-            result = find_last_user_entry(uid, ws)
-            if not result:
-                send(chat, "У вас нет активных записей в этом разделе.", FLOW_MENU_KB)
-                return
-            row_index, row = result
-            action_ru = "Брак" if flow == "defect" else ("Запуск" if len(row)>3 and row[3]=="запуск" else "Остановка")
-            msg = f"<b>Последняя запись найдена:</b>\n"
-            msg += f"{row[0]} {row[1]} • Линия {row[2]}\n"
-            msg += f"Действие: {action_ru}\n"
-            if flow == "defect":
-                msg += f"ЗНП: <code>{row[4] if len(row)>4 else '—'}</code>\n"
-                msg += f"Брака: {row[5] if len(row)>5 else '—'} м\n"
-                msg += f"Вид: {row[6] if len(row)>6 else '—'}\n"
-            else:
-                msg += f"Причина: {row[4] if len(row)>4 else '—'}\n"
-            msg += "\n<b>Удалить эту запись?</b>"
-            send(chat, msg, CONFIRM_DELETE_KB)
-            states[uid].update({
-                "step": "confirm_delete",
-                "ws": ws,
-                "row_index": row_index
-            })
-            return
-        send(chat, "Выберите действие:", FLOW_MENU_KB)
-        return
+                records = get_last_records(ws_startstop, 2)
+                msg = "<b>Последние записи Старт/Стоп:</b>\n\n"
+                if not records:
+                    msg += "Нет записей."
+                else:
+                    for r in records:
+                        action = "Запуск" if r[3] == "запуск" else "Остановка"
+                        reason = r[4] if len(r)>4 else "—"
+                        msg += f"• {r[0]} {r[1]} | Линия {r[2]} | {action} | {reason}\n"
+                send(chat, msg)
+                states[uid].update({"step": "line", "data": {}})
+            send(chat, "Введите номер линии (1–15):", CANCEL_KB)
+            return
+
+        if text == "Отменить последнюю запись":
+            ws = ws_defect if flow == "defect" else ws_startstop
+            result = find_last_user_entry(uid, ws)
+
+            if not result:
+                send(chat, "У вас нет активных записей в этом разделе.", FLOW_MENU_KB)
+                return
+
+            row_index, row = result
+            action_ru = "Брак" if flow == "defect" else ("Запуск" if len(row)>3 and row[3]=="запуск" else "Остановка")
+
+            msg = f"<b>Последняя запись найдена:</b>\n"
+            msg += f"{row[0]} {row[1]} • Линия {row[2]}\n"
+            msg += f"Действие: {action_ru}\n"
+            if flow == "defect":
+                msg += f"ЗНП: <code>{row[4] if len(row)>4 else '—'}</code>\n"
+                msg += f"Брака: {row[5] if len(row)>5 else '—'} м\n"
+                msg += f"Вид: {row[6] if len(row)>6 else '—'}\n"
+            else:
+                msg += f"Причина: {row[4] if len(row)>4 else '—'}\n"
+            msg += "\n<b>Удалить эту запись?</b>"
+
+            send(chat, msg, CONFIRM_DELETE_KB)
+            states[uid].update({
+                "step": "confirm_delete",
+                "ws": ws,
+                "row_index": row_index,
+                "awaiting_flow_choice": True
+            })
+            return
+
+        # Если нажали что-то другое — повторяем меню
+        send(chat, "Выберите действие:", FLOW_MENU_KB)
+        return
         
     # Отмена в процессе ввода
     if text == "Отмена":

@@ -150,26 +150,51 @@ def find_last_user_entry(uid, worksheet):
     try:
         values = worksheet.get_all_values()
         if len(values) <= 1:
+            log.info(f"[{worksheet.title}] Лист пустой")
             return None
 
         header = values[0]
+        log.info(f"[{worksheet.title}] Заголовки: {header}")
+
+        # Ищем индекс колонки "Пользователь"
         try:
-            user_col_index = header.index("Пользователь")  # находим колонку по названию
+            user_col_index = header.index("Пользователь")
+            log.info(f"[{worksheet.title}] Колонка 'Пользователь' найдена на позиции {user_col_index + 1}")
         except ValueError:
-            log.error(f"Колонка 'Пользователь' не найдена в листе {worksheet.title}")
+            log.error(f"[{worksheet.title}] Колонка 'Пользователь' НЕ найдена в заголовках!")
             return None
 
+        # Ищем снизу вверх
         for i in range(len(values)-1, 0, -1):
             row = values[i]
-            if len(row) > user_col_index and str(uid) in row[user_col_index]:
-                # Проверяем статус "Удалено" (если колонка существует)
-                status = row[10] if len(row) > 10 else ""
-                if status.strip() == "Удалено":
+            if len(row) <= user_col_index:
+                continue
+
+            user_cell = row[user_col_index].strip()
+            uid_str = str(uid)
+
+            # Гибкий поиск: либо точное совпадение, либо uid в начале строки
+            if user_cell == uid_str or user_cell.startswith(uid_str + " "):
+                # Проверяем статус "Удалено"
+                status = ""
+                if len(row) > 10:
+                    status = row[10].strip()
+                elif len(row) > 9 and len(header) > 10:
+                    # Иногда статус может быть не заполнен, но колонка существует
+                    status = ""
+
+                if status == "Удалено":
+                    log.info(f"[{worksheet.title}] Строка {i+1} пропущена — уже удалена")
                     continue
+
+                log.info(f"[{worksheet.title}] НАЙДЕНА запись пользователя {uid} в строке {i+1}")
                 return i + 1, row
+
+        log.info(f"[{worksheet.title}] Запись с uid {uid} не найдена (проверено {len(values)-1} строк)")
         return None
+
     except Exception as e:
-        log.error(f"find_last_user_entry error: {e}")
+        log.error(f"Ошибка в find_last_user_entry для {worksheet.title}: {e}")
         return None
         
 # ==================== Пометить как "Удалено" + уведомление ====================

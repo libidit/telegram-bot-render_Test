@@ -2,228 +2,113 @@
 # Всё работает: последние записи, уведомления контролёрам, отмена с подтверждением
 # Изменение: при выборе времени через кнопки к формату чч:мм добавляются текущие секунды (чч:мм:сс).
 import os
-import json
-import logging
-import requests
-import threading
-import time
-from datetime import datetime, timedelta, timezone
-from flask import Flask, request
-import gspread
-from google.oauth2 import service_account
-from filelock import FileLock
+except gspread.exceptions.WorksheetNotFound:
+ws = sh.add_worksheet(title=sheet_name, rows=3000, cols=20)
+if headers and ws.row_values(1) != headers:
+ws.clear()
+ws.insert_row(headers, 1)
+return ws
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("bot")
-
-# ==================== ENV ====================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
-if not all([TELEGRAM_TOKEN, SPREADSHEET_ID, GOOGLE_CREDS_JSON]):
-    raise RuntimeError("Missing required env vars")
-
-creds_dict = json.loads(GOOGLE_CREDS_JSON)
-creds = service_account.Credentials.from_service_account_info(
-    creds_dict,
-    scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-)
-
-gc = gspread.authorize(creds)
-sh = gc.open_by_key(SPREADSHEET_ID)
-
-# ==================== Московское время ====================
-MSK = timezone(timedelta(hours=3))
-def now_msk():
-    return datetime.now(MSK)
-
-# ==================== Листы ====================
-STARTSTOP_SHEET = "Старт-Стоп"
-DEFECT_SHEET = "Брак"
-CTRL_STARTSTOP_SHEET = "Контр_Старт-Стоп"
-CTRL_DEFECT_SHEET = "Контр_Брак"
-
-HEADERS_STARTSTOP = ["Дата","Время","Номер линии","Действие","Причина","ЗНП","Метров брака","Вид брака","Пользователь","Время отправки","Статус"]
-HEADERS_DEFECT    = ["Дата","Время","Номер линии","Действие","ЗНП","Метров брака","Вид брака","Пользователь","Время отправки","Статус"]
-
-def get_ws(sheet_name, headers=None):
-    try:
-        ws = sh.worksheet(sheet_name)
-    except gspread.exceptions.WorksheetNotFound:
-        ws = sh.add_worksheet(title=sheet_name, rows=3000, cols=20)
-    if headers and ws.row_values(1) != headers:
-        ws.clear()
-        ws.insert_row(headers, 1)
-    return ws
 
 ws_startstop = get_ws(STARTSTOP_SHEET, HEADERS_STARTSTOP)
-ws_defect    = get_ws(DEFECT_SHEET, HEADERS_DEFECT)
-ws_ctrl_ss   = get_ws(CTRL_STARTSTOP_SHEET)
-ws_ctrl_def  = get_ws(CTRL_DEFECT_SHEET)
+ws_defect = get_ws(DEFECT_SHEET, HEADERS_DEFECT)
+ws_ctrl_ss = get_ws(CTRL_STARTSTOP_SHEET)
+ws_ctrl_def = get_ws(CTRL_DEFECT_SHEET)
 
-# ==================== Контролёры (кешируем) ====================
+
+# ==================== Контролёры ====================
 def get_controllers(sheet):
-    try:
-        ids = sheet.col_values(1)[1:]
-        return [int(i.strip()) for i in ids if i.strip().isdigit()]
-    except:
-        return []
+try:
+ids = sheet.col_values(1)[1:]
+return [int(i.strip()) for i in ids if i.strip().isdigit()]
+except:
+return []
+
 
 controllers_startstop = get_controllers(ws_ctrl_ss)
 controllers_defect = get_controllers(ws_ctrl_def)
 
-# ==================== Последние записи (без "Удалено") ====================
+
+# ==================== Последние записи ====================
 def get_last_records(ws, n=2):
-    try:
-        values = ws.get_all_values()
-        if len(values) <= 1:
-            return []
+try:
+values = ws.get_all_values()
+if len(values) <= 1:
+return []
+return values[-n:]
+except:
+return []
 
-        header = values[0]
-        try:
-            status_col_index = header.index("Статус")  # находим колонку "Статус" по названию
-        except ValueError:
-            status_col_index = -1  # если нет — считаем, что нет удалённых
 
-        valid = []
-        for row in reversed(values[1:]):
-            # Если колонка Статус существует и не "Удалено"
-            if status_col_index == -1 or len(row) <= status_col_index or row[status_col_index].strip() != "Удалено":
-                valid.append(row)
-                if len(valid) >= n:
-                    break
-        return list(reversed(valid))
-    except Exception as e:
-        log.error(f"get_last_records error: {e}")
-        return []
-
-# ==================== Уведомление контролёрам ====================
+# ==================== Уведомления ====================
 def notify_controllers(ids, message):
-    for cid in ids:
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={"chat_id": cid, "text": message, "parse_mode": "HTML"},
-                timeout=10
-            )
-        except:
-            pass
+for cid in ids:
+try:
+requests.post(
+f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+json={"chat_id": cid, "text": message, "parse_mode": "HTML"},
+timeout=10
+)
+except:
+pass
 
-# ==================== Запись + уведомление ====================
+
+# ==================== Запись ====================
 def append_row(data):
-    flow = data.get("flow", "startstop")
-    ws = ws_defect if flow == "defect" else ws_startstop
-    ts = now_msk().strftime("%Y-%m-%d %H:%M:%S")
-    user = data["user"]
+flow = data.get("flow", "startstop")
+ws = ws_defect if flow == "defect" else ws_startstop
+ts = now_msk().strftime("%Y-%m-%d %H:%M:%S")
+user = data["user"]
 
-    if flow == "defect":
-        row = [data["date"], data["time"], data["line"], "брак",
-               data.get("znp", ""), data["meters"],
-               data.get("defect_type", ""), user, ts, ""]
-    else:
-        row = [data["date"], data["time"], data["line"], data["action"],
-               data.get("reason", ""), data.get("znp", ""), data["meters"],
-               data.get("defect_type", ""), user, ts, ""]
 
-    ws.append_row(row, value_input_option="USER_ENTERED")
+if flow == "defect":
+row = [data["date"], data["time"], data["line"], "брак",
+data.get("znp", ""), data["meters"],
+data.get("defect_type", ""), user, ts, ""]
+else:
+row = [data["date"], data["time"], data["line"], data["action"],
+data.get("reason", ""), data.get("znp", ""), data.get("meters",""),
+data.get("defect_type",""), user, ts, ""]
 
-    # Уведомления
-    if flow == "defect":
-        msg = (f"НОВАЯ ЗАПИСЬ БРАКА\n"
-               f"Линия: {data['line']}\n"
-               f"{data['date']} {data['time']}\n"
-               f"ЗНП: <code>{data.get('znp','—')}</code>\n"
-               f"Метров брака: {data['meters']}\n"
-               f"Вид брака: {data.get('defect_type','—')}")
-        notify_controllers(controllers_defect, msg)
-    else:
-        action_ru = "Запуск" if data["action"] == "запуск" else "Остановка"
-        msg = (f"НОВАЯ ЗАПИСЬ СТАРТ/СТОП\n"
-               f"Линия: {data['line']}\n"
-               f"{data['date']} {data['time']}\n"
-               f"Действие: {action_ru}\n"
-               f"Причина: {data.get('reason','—')}")
-        notify_controllers(controllers_startstop, msg)
 
-# ==================== Поиск последней записи пользователя (ОДНА ЕДИНСТВЕННАЯ ФУНКЦИЯ) ====================
-def find_last_user_entry(uid, worksheet):
-    """Ищет последнюю НЕудалённую запись пользователя в указанном листе"""
-    try:
-        values = worksheet.get_all_values()
-        if len(values) <= 1:
-            return None
+ws.append_row(row, value_input_option="USER_ENTERED")
 
-        header = values[0]
-        try:
-            user_col_idx = header.index("Пользователь")
-        except ValueError:
-            log.error(f"Колонка 'Пользователь' не найдена в листе {worksheet.title}")
-            return None
 
-        for i in range(len(values) - 1, 0, -1):
-            row = values[i]
-            if len(row) <= user_col_idx:
-                continue
-            user_cell = row[user_col_idx].strip()
-            if str(uid) in user_cell or (user_cell.startswith(str(uid) + " ") or user_cell == str(uid)):
-                # Проверяем статус "Удалено" (колонка 11, индекс 10)
-                status = row[10].strip() if len(row) > 10 else ""
-                if status == "Удалено":
-                    continue
-                return i + 1, row
+if flow == "defect":
+msg = (f"НОВАЯ ЗАПИСЬ БРАКА\n"
+f"Линия: {data['line']}\n"
+f"{data['date']} {data['time']}\n"
+f"ЗНП: <code>{data.get('znp','—')}</code>\n"
+f"Метров брака: {data['meters']}\n"
+f"Вид брака: {data.get('defect_type','—')}")
+notify_controllers(controllers_defect, msg)
+else:
+action_ru = "Запуск" if data["action"] == "запуск" else "Остановка"
+msg = (f"НОВАЯ ЗАПИСЬ СТАРТ/СТОП\n"
+f"Линия: {data['line']}\n"
+f"{data['date']} {data['time']}\n"
+f"Действие: {action_ru}\n"
+f"Причина: {data.get('reason','—')}")
+notify_controllers(controllers_startstop, msg)
 
-        return None
-    except Exception as e:
-        log.error(f"find_last_user_entry error ({worksheet.title}): {e}")
-        return None
-        
-# ==================== Пометить как удалено (ОДНА ЕДИНСТВЕННАЯ ФУНКЦИЯ) ====================
-def mark_as_deleted(ws, row_index):
-    try:
-        ws.update_cell(row_index, 11, "Удалено")
-        row = ws.row_values(row_index)
-        sheet_name = ws.title
-
-        if sheet_name == "Брак":
-            msg = (f"ЗАПИСЬ БРАКА УДАЛЕНА\n"
-                   f"Линия {row[2]}\n"
-                   f"{row[0]} {row[1]}\n"
-                   f"ЗНП: <code>{row[4] if len(row)>4 else '—'}</code>\n"
-                   f"Метров: {row[5] if len(row)>5 else '—'}")
-            notify_controllers(controllers_defect, msg)
-        else:
-            action = "Запуск" if len(row)>3 and row[3] == "запуск" else "Остановка"
-            msg = (f"ЗАПИСЬ СТАРТ/СТОП УДАЛЕНА\n"
-                   f"Линия {row[2]}\n"
-                   f"{row[0]} {row[1]}\n"
-                   f"Действие: {action}\n"
-                   f"Причина: {row[4] if len(row)>4 else '—'}")
-            notify_controllers(controllers_startstop, msg)
-    except Exception as e:
-        log.error(f"mark_as_deleted error: {e}")
 
 # ==================== Клавиатуры ====================
+
+
 def keyboard(rows):
-    return {
-        "keyboard": [[{"text": t} for t in row] for row in rows],
-        "resize_keyboard": True,
-        "one_time_keyboard": False,
-        "input_field_placeholder": "Выберите действие"
-    }
+return {
+"keyboard": [[{"text": t} for t in row] for row in rows],
+"resize_keyboard": True,
+"one_time_keyboard": False
+}
 
-# Главное меню
+
 MAIN_KB = keyboard([
-    ["Старт/Стоп", "Брак"]
+["Старт/Стоп", "Брак"]
 ])
 
-# Подменю для каждого потока
-FLOW_MENU_KB = keyboard([
-    ["Новая запись", "Отменить последнюю запись"],
-    ["Назад"]
-])
 
 CANCEL_KB = keyboard([["Отмена"]])
-CONFIRM_DELETE_KB = keyboard([["Да, удалить", "Нет"]])
 
 REASONS_CACHE = {"kb": None, "until": 0}
 DEFECTS_CACHE = {"kb": None, "until": 0}

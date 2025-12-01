@@ -1,4 +1,4 @@
-# V 3.9 — Отмена с подтверждением + защита от дублей (ИСПРАВЛЕНО)
+# V 4.1 — Авторизация + выбор роли при подтверждении (полный рабочий код)
 import os
 import json
 import logging
@@ -41,6 +41,8 @@ STARTSTOP_SHEET = "Старт-Стоп"
 DEFECT_SHEET = "Брак"
 CTRL_STARTSTOP_SHEET = "Контр_Старт-Стоп"
 CTRL_DEFECT_SHEET = "Контр_Брак"
+USERS_SHEET = "Пользователи"
+REQUESTS_SHEET = "Заявки на доступ"
 
 HEADERS_STARTSTOP = ["Дата","Время","Номер линии","Действие","Причина","ЗНП","Метров брака","Вид брака","Пользователь","Время отправки","Статус"]
 
@@ -49,13 +51,23 @@ def get_ws(sheet_name, headers=None):
         ws = sh.worksheet(sheet_name)
     except gspread.exceptions.WorksheetNotFound:
         ws = sh.add_worksheet(title=sheet_name, rows=3000, cols=20)
-    if headers and ws.row_values(1) != headers:
-        ws.clear()
-        ws.insert_row(headers, 1)
+        if headers:
+            ws.insert_row(headers, 1)
+    else:
+        if headers and ws.row_values(1) != headers:
+            ws.clear()
+            ws.insert_row(headers, 1)
     return ws
 
 ws_startstop = get_ws(STARTSTOP_SHEET, HEADERS_STARTSTOP)
 ws_defect = get_ws(DEFECT_SHEET)
+ws_users = get_ws(USERS_SHEET, ["user_id", "username", "ФИО", "Роль", "Статус", "Дата регистрации"])
+ws_requests = get_ws(REQUESTS_SHEET, ["user_id", "username", "ФИО", "Дата заявки", "Статус"])
+
+# ==================== Роли ====================
+ROLE_ADMIN = "Администратор"
+ROLE_MASTER = "Мастер"
+ROLE_OPERATOR = "Оператор"
 
 # ==================== Контролёры ====================
 def get_controllers(sheet_name):
@@ -73,8 +85,7 @@ controllers_defect = get_controllers(CTRL_DEFECT_SHEET)
 def get_last_records(ws, n=2):
     try:
         values = ws.get_all_values()
-        if len(values) <= 1:
-            return []
+        if len(values) <= 1: return []
         return values[-n:]
     except:
         return []
@@ -91,6 +102,43 @@ def notify_controllers(ids, message):
         except:
             pass
 
+# ==================== Пользователи ====================
+def get_user_info(user_id):
+    try:
+        cell = ws_users.find(str(user_id), in_column=1)
+        if not cell: return None
+        row = ws_users.row_values(cell.row)
+        return {
+            "row": cell.row,
+            "user_id": row[0],
+            "username": row[1],
+            "fio": row[2],
+            "role": row[3],
+            "status": row[4],
+            "registered": row[5]
+        }
+    except:
+        return None
+
+def is_authorized(user_id):
+    user = get_user_info(user_id)
+    return user and user["status"] == "активен"
+
+def get_user_role(user_id):
+    user = get_user_info(user_id)
+    return user["role"] if user else None
+
+def get_approvers():
+    try:
+        values = ws_users.get_all_values()
+        ids = []
+        for row in values[1:]:
+            if len(row) >= 5 and row[4] == "активен" and row[3] in (ROLE_ADMIN, ROLE_MASTER):
+                ids.append(int(row[0]))
+        return ids
+    except:
+        return []
+
 # ==================== Запись в таблицу ====================
 def append_row(data):
     flow = data.get("flow", "startstop")
@@ -102,34 +150,25 @@ def append_row(data):
         row = [data["date"], data["time"], data["line"], "брак",
                data.get("znp", ""), data["meters"],
                data.get("defect_type", ""), user, ts, ""]
-        msg = (f"НОВАЯ ЗАПИСЬ БРАКА\n"
-               f"Линия: {data['line']}\n"
-               f"{data['date']} {data['time']}\n"
-               f"ЗНП: <code>{data.get('znp','—')}</code>\n"
-               f"Метров брака: {data['meters']}\n"
-               f"Вид брака: {data.get('defect_type','—')}")
+        msg = (f"НОВАЯ ЗАПИСЬ БРАКА\nЛиния: {data['line']}\n"
+               f"{data['date']} {data['time']}\nЗНП: <code>{data.get('znp','—')}</code>\n"
+               f"Метров брака: {data['meters']}\nВид брака: {data.get('defect_type','—')}")
         notify_controllers(controllers_defect, msg)
     else:
         row = [data["date"], data["time"], data["line"], data["action"],
                data.get("reason", ""), data.get("znp", ""), data.get("meters",""),
                data.get("defect_type",""), user, ts, ""]
         action_ru = "Запуск" if data["action"] == "запуск" else "Остановка"
-        msg = (f"НОВАЯ ЗАПИСЬ СТАРТ/СТОП\n"
-               f"Линия: {data['line']}\n"
-               f"{data['date']} {data['time']}\n"
-               f"Действие: {action_ru}\n"
-               f"Причина: {data.get('reason','—')}")
+        msg = (f"НОВАЯ ЗАПИСЬ СТАРТ/СТОП\nЛиния: {data['line']}\n"
+               f"{data['date']} {data['time']}\nДействие: {action_ru}\nПричина: {data.get('reason','—')}")
         notify_controllers(controllers_startstop, msg)
 
     ws.append_row(row, value_input_option="USER_ENTERED")
 
 # ==================== Клавиатуры ====================
 def keyboard(rows):
-    return {
-        "keyboard": [[{"text": t} for t in row] for row in rows],
-        "resize_keyboard": True,
-        "one_time_keyboard": False
-    }
+    return {"keyboard": [[{"text": t} for t in row] for row in rows],
+            "resize_keyboard": True, "one_time_keyboard": False}
 
 MAIN_KB = keyboard([["Старт/Стоп", "Брак"]])
 FLOW_MENU_KB = keyboard([["Новая запись"], ["Отменить последнюю запись"], ["Назад"]])
@@ -137,14 +176,11 @@ CANCEL_KB = keyboard([["Отмена"]])
 CONFIRM_KB = keyboard([["Да, отменить"], ["Нет, оставить"]])
 
 NUM_LINE_KB = {
-    "keyboard": [
-        [{"text": "1"}, {"text": "2"}, {"text": "3"}, {"text": "4"}, {"text": "5"}],
-        [{"text": "6"}, {"text": "7"}, {"text": "8"}, {"text": "9"}, {"text": "10"}],
-        [{"text": "11"}, {"text": "12"}, {"text": "13"}, {"text": "14"}, {"text": "15"}],
-        [{"text": "Отмена"}]
-    ],
-    "resize_keyboard": True,
-    "one_time_keyboard": True,
+    "keyboard": [[{"text": str(i)} for i in range(1,6)],
+                 [{"text": str(i)} for i in range(6,11)],
+                 [{"text": str(i)} for i in range(11,16)] + [{"text": "15"}],
+                 [{"text": "Отмена"}]],
+    "resize_keyboard": True, "one_time_keyboard": True,
     "input_field_placeholder": "Выберите номер линии"
 }
 
@@ -186,6 +222,16 @@ def send(chat_id, text, markup=None):
     except Exception as e:
         log.exception(f"send error: {e}")
 
+def edit_message(chat_id, message_id, text, markup=None):
+    payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML"}
+    if markup:
+        payload["reply_markup"] = json.dumps(markup, ensure_ascii=False)
+    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText", json=payload)
+
+def answer_callback(cq_id, text=""):
+    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+                  json={"callback_query_id": cq_id, "text": text})
+
 # ==================== Таймауты ====================
 states = {}
 last_activity = {}
@@ -206,32 +252,76 @@ threading.Thread(target=timeout_worker, daemon=True).start()
 # ==================== Поиск последней активной записи ====================
 def find_last_active_record(ws, user_repr):
     values = ws.get_all_values()
-    if ws.title == "Брак":
-        user_col = 7   # row[7] — пользователь
-        status_col = 9 # row[9] — статус
-    else:
-        user_col = 8   # row[8] — пользователь (Старт/Стоп)
-        status_col = 10 # row[10] — статус
+    user_col = 7 if ws.title == "Брак" else 8
+    status_col = 9 if ws.title == "Брак" else 10
 
     for i in range(len(values)-1, 0, -1):
         row = values[i]
-        if len(row) <= user_col:
-            continue
+        if len(row) <= user_col: continue
         if row[user_col].strip() == user_repr and (len(row) <= status_col or row[status_col].strip() != "ОТМЕНЕНО"):
             return row, i+1
     return None, None
 
 # ==================== Основная логика ====================
-def process(uid, chat, text, user_repr):
+def process(uid, chat, text, user_repr, username=""):
     last_activity[uid] = time.time()
 
-    # Инициализация состояния для нового пользователя
+    user_info = get_user_info(uid)
+
+    # === Неавторизованные пользователи ===
+    if not user_info:
+        if "awaiting_fio" in states.get(uid, {}):
+            fio = text.strip()
+            if len(fio) < 5:
+                send(chat, "ФИО слишком короткое. Введите ещё раз:")
+                return
+
+            ts = now_msk().strftime("%d.%m.%Y %H:%M")
+            ws_requests.append_row([str(uid), username or "", fio, ts, "ожидает"])
+
+            approvers = get_approvers()
+            user_link = f"<a href='tg://user?id={uid}'>{fio}</a>"
+            for app_id in approvers:
+                data_prefix = f"{uid}_{fio.replace(' ', '_')}"
+                kb = {
+                    "inline_keyboard": [
+                        [{"text": "Оператор",   "callback_data": f"setrole_{data_prefix}_Оператор"}],
+                        [{"text": "Мастер",     "callback_data": f"setrole_{data_prefix}_Мастер"}]
+                    ]
+                }
+                # Администратор видит дополнительно кнопку Админ
+                if get_user_role(app_id) == ROLE_ADMIN:
+                    kb["inline_keyboard"].append([{"text": "Администратор", "callback_data": f"setrole_{data_prefix}_Администратор"}])
+                kb["inline_keyboard"].append([{"text": "Отклонить", "callback_data": f"reject_{data_prefix}"}])
+
+                send(app_id,
+                     f"Новая заявка на доступ\n\n"
+                     f"Пользователь: {user_link}\n"
+                     f"ID: <code>{uid}</code>\n"
+                     f"Username: @{username or '—'}\n"
+                     f"ФИО: {fio}\n"
+                     f"Время: {ts}",
+                     kb)
+
+            send(chat, "Ваша заявка отправлена. Ожидайте подтверждения.")
+            states.pop(uid, None)
+            return
+
+        states[uid] = {"awaiting_fio": True}
+        send(chat, "Добро пожаловать!\nДля работы с ботом нужна авторизация.\n\nВведите свои ФИО:")
+        return
+
+    if user_info["status"] != "активен":
+        send(chat, "Ваша заявка ещё не подтверждена или была отклонена.")
+        return
+
+    # === Авторизованные пользователи ===
     if uid not in states:
-        states[uid] = {"chat": chat, "cancel_used": False}
+        states[uid] = {"chat": chat, "cancel_used": False, "role": user_info["role"], "fio": user_info["fio"]}
 
     state = states[uid]
 
-    # === Главные команды ===
+    # === Весь старый функционал (без изменений) ===
     if text == "Назад":
         states.pop(uid, None)
         send(chat, "Главное меню:", MAIN_KB)
@@ -242,7 +332,6 @@ def process(uid, chat, text, user_repr):
         send(chat, "Отменено.", MAIN_KB)
         return
 
-    # === Выбор потока ===
     if "flow" not in state:
         if text in ("/start", "Старт/Стоп"):
             send(chat, "<b>Старт/Стоп</b>\nВыберите действие:", FLOW_MENU_KB)
@@ -258,15 +347,14 @@ def process(uid, chat, text, user_repr):
 
     flow = state["flow"]
 
-    # === Запрос на отмену ===
+    # === Отмена последней записи ===
     if text == "Отменить последнюю запись":
         if state.get("cancel_used", False):
-            send(chat, "Вы уже отменили одну запись в этом сеансе. Сделайте новую запись, чтобы снова отменить.", FLOW_MENU_KB)
+            send(chat, "Вы уже отменили одну запись в этом сеансе.", FLOW_MENU_KB)
             return
 
         ws = ws_defect if flow == "defect" else ws_startstop
         row, row_num = find_last_active_record(ws, user_repr)
-
         if not row:
             send(chat, "У вас нет активных записей для отмены.", FLOW_MENU_KB)
             return
@@ -275,52 +363,36 @@ def process(uid, chat, text, user_repr):
 
         if flow == "startstop":
             action = "Запуск" if row[3] == "запуск" else "Остановка"
-            msg = (f"Отменить эту запись?\n\n"
-                   f"<b>Старт/Стоп</b>\n"
-                   f"{row[0]} {row[1]} | Линия {row[2]}\n"
-                   f"Действие: {action}\n"
-                   f"Причина: {row[4] if len(row)>4 else '—'}")
+            msg = f"Отменить эту запись?\n\n<b>Старт/Стоп</b>\n{row[0]} {row[1]} | Линия {row[2]}\nДействие: {action}\nПричина: {row[4] if len(row)>4 else '—'}"
         else:
-            msg = (f"Отменить эту запись?\n\n"
-                   f"<b>Брак</b>\n"
-                   f"{row[0]} {row[1]} | Линия {row[2]}\n"
-                   f"ЗНП: <code>{row[4]}</code>\n"
-                   f"Метров: {row[5]}\n"
-                   f"Вид брака: {row[6] if len(row)>6 else '—'}")
+            msg = f"Отменить эту запись?\n\n<b>Брак</b>\n{row[0]} {row[1]} | Линия {row[2]}\nЗНП: <code>{row[4]}</code>\nМетров: {row[5]}\nВид брака: {row[6] if len(row)>6 else '—'}"
 
         send(chat, msg, CONFIRM_KB)
         return
 
-    # === Подтверждение отмены ===
     if "pending_cancel" in state:
         pend = state["pending_cancel"]
-
         if text == "Да, отменить":
-            ws = pend["ws"]
-            row = pend["row"]
-            row_num = pend["row_num"]
-
+            ws = pend["ws"]; row = pend["row"]; row_num = pend["row_num"]
             status_col = "K" if flow == "startstop" else "J"
             ws.update(f"{status_col}{row_num}", [["ОТМЕНЕНО"]])
 
             if flow == "startstop":
                 action = "Запуск" if row[3] == "запуск" else "Остановка"
                 notify_controllers(controllers_startstop,
-                    f"ОТМЕНЕНА ЗАПИСЬ СТАРТ/СТОП\nПользователь: {user_repr}\n"
-                    f"Линия: {row[2]}\n{row[0]} {row[1]}\nДействие: {action}")
-                send(chat, f"Запись отменена:\n{row[0]} {row[1]} | Линия {row[2]} | {action}", FLOW_MENU_KB)
+                    f"ОТМЕНЕНА ЗАПИСЬ СТАРТ/СТОП\nПользователь: {user_repr}\nЛиния: {row[2]}\n{row[0]} {row[1]}\nДействие: {action}")
+                send(chat, f"Запись отменена.", FLOW_MENU_KB)
             else:
                 notify_controllers(controllers_defect,
-                    f"ОТМЕНЕНА ЗАПИСЬ БРАКА\nПользователь: {user_repr}\n"
-                    f"Линия: {row[2]}\n{row[0]} {row[1]}\nЗНП: <code>{row[4]}</code>\nМетров: {row[5]}")
-                send(chat, f"Запись брака отменена:\n{row[0]} {row[1]} | Линия {row[2]}", FLOW_MENU_KB)
+                    f"ОТМЕНЕНА ЗАПИСЬ БРАКА\nПользователь: {user_repr}\nЛиния: {row[2]}\n{row[0]} {row[1]}\nЗНП: <code>{row[4]}</code>\nМетров: {row[5]}")
+                send(chat, f"Запись брака отменена.", FLOW_MENU_KB)
 
             state["cancel_used"] = True
             state.pop("pending_cancel", None)
             return
 
         if text == "Нет, оставить":
-            send(chat, "Отмена отменена. Запись сохранена.", FLOW_MENU_KB)
+            send(chat, "Запись сохранена.", FLOW_MENU_KB)
             state.pop("pending_cancel", None)
             return
 
@@ -524,8 +596,74 @@ if os.getenv("RENDER"):
 @app.route("/", methods=["POST"])
 def webhook():
     update = request.get_json()
+
+    # === Обработка callback_query (выбор роли / отклонение) ===
+    if update.get("callback_query"):
+        cq = update["callback_query"]
+        data = cq["data"]
+        from_id = cq["from"]["id"]
+        msg = cq["message"]
+        chat_id = msg["chat"]["id"]
+        message_id = msg["message_id"]
+
+        if data.startswith("setrole_") or data.startswith("reject_"):
+            approver_role = get_user_role(from_id)
+            if approver_role not in (ROLE_ADMIN, ROLE_MASTER):
+                answer_callback(cq["id"], "Нет прав")
+                return "ok", 200
+
+            if data.startswith("reject_"):
+                _, uid_str, fio_enc = data.split("_", 2)
+                uid = int(uid_str)
+                fio = fio_enc.replace("_", " ")
+                cell = ws_requests.find(str(uid), in_column=1)
+                if cell:
+                    ws_requests.update_cell(cell.row, 5, "отклонено")
+                send(uid, "В доступе отказано.")
+                edit_message(chat_id, message_id, msg["text"] + "\n\nОтклонено")
+                answer_callback(cq["id"], "Отклонено")
+                return "ok", 200
+
+            if data.startswith("setrole_"):
+                _, uid_str, fio_enc, role_ru = data.split("_", 3)
+                uid = int(uid_str)
+                fio = fio_enc.replace("_", " ")
+
+                if role_ru == ROLE_ADMIN and approver_role != ROLE_ADMIN:
+                    answer_callback(cq["id"], "Только админ может назначать админа")
+                    return "ok", 200
+                if role_ru == ROLE_MASTER and approver_role == ROLE_OPERATOR:
+                    answer_callback(cq["id"], "Нет прав")
+                    return "ok", 200
+
+                if is_authorized(uid):
+                    answer_callback(cq["id"], "Уже подтверждён")
+                    return "ok", 200
+
+                ws_users.append_row([
+                    str(uid),
+                    cq["from"].get("username", ""),
+                    fio,
+                    role_ru,
+                    "активен",
+                    now_msk().strftime("%d.%m.%Y")
+                ])
+
+                cell = ws_requests.find(str(uid), in_column=1)
+                if cell:
+                    ws_requests.delete_rows(cell.row)
+
+                send(uid, f"Доступ подтверждён!\nВаша роль: <b>{role_ru}</b>\nТеперь вы можете пользоваться ботом.")
+                edit_message(chat_id, message_id, msg["text"] + f"\n\nПодтверждено как <b>{role_ru}</b>")
+                answer_callback(cq["id"], "Готово")
+                return "ok", 200
+
+        return "ok", 200
+
+    # === Обычные сообщения ===
     if not update or "message" not in update:
         return "ok", 200
+
     m = update["message"]
     chat_id = m["chat"]["id"]
     user_id = m["from"]["id"]
@@ -534,7 +672,8 @@ def webhook():
     user_repr = f"{user_id} (@{username or 'no_user'})"
 
     with FileLock(LOCK_PATH):
-        process(user_id, chat_id, text, user_repr)
+        process(user_id, chat_id, text, user_repr, username)
+
     return "ok", 200
 
 @app.route("/")

@@ -367,8 +367,8 @@ def process(uid, chat, text, user_repr):
 
     flow = states[uid]["flow"]
 
-    # Обработка подменю (первое нажатие)
-    if states[uid].get("awaiting_flow_choice") is None:
+    # Обработка выбора в подменю
+    if states[uid].get("awaiting_flow_choice") is not True:
         if text == "Новая запись":
             states[uid]["awaiting_flow_choice"] = True
             if flow == "defect":
@@ -406,9 +406,7 @@ def process(uid, chat, text, user_repr):
                 send(chat, "У вас нет активных записей в этом разделе.", FLOW_MENU_KB)
                 return
             row_index, row = result
-
             action_ru = "Брак" if flow == "defect" else ("Запуск" if len(row)>3 and row[3]=="запуск" else "Остановка")
-
             msg = f"<b>Последняя запись найдена:</b>\n"
             msg += f"{row[0]} {row[1]} • Линия {row[2]}\n"
             msg += f"Действие: {action_ru}\n"
@@ -419,18 +417,18 @@ def process(uid, chat, text, user_repr):
             else:
                 msg += f"Причина: {row[4] if len(row)>4 else '—'}\n"
             msg += "\n<b>Удалить эту запись?</b>"
-
             send(chat, msg, CONFIRM_DELETE_KB)
             states[uid].update({
                 "step": "confirm_delete",
                 "ws": ws,
-                "row_index": row_index
+                "row_index": row_index,
+                "awaiting_flow_choice": True  # важно: помечаем, что выбор сделан
             })
             return
 
         send(chat, "Выберите действие:", FLOW_MENU_KB)
         return
-
+        
     # Отмена в процессе ввода
     if text == "Отмена":
         states.pop(uid, None)

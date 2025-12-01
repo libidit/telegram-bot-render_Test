@@ -1,6 +1,11 @@
-# bot_webhook.py — ФИНАЛЬНАЯ ВЕРСИЯ (декабрь 2025)
-# Всё работает: последние записи, уведомления контролёрам, отмена с подтверждением
-# Изменение: при выборе времени через кнопки к формату чч:мм добавляются текущие секунды (чч:мм:сс).
+# ВЕРСИЯ БЕЗ ФУНКЦИОНАЛА "ОТМЕНЫ ПОСЛЕДНЕЙ ЗАПИСИ"
+# Из кода полностью удалены:
+# - Кнопка "Отменить последнюю запись"
+# - Логика поиска последней записи пользователя
+# - Логика подтверждения удаления
+# - Функции mark_as_deleted и find_last_entry
+# - Вызовы, связанные с отменой записи
+
 import os
 import json
 import logging
@@ -8,7 +13,6 @@ import requests
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-
 from flask import Flask, request
 import gspread
 from google.oauth2 import service_account
@@ -21,18 +25,15 @@ log = logging.getLogger("bot")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
-
 if not all([TELEGRAM_TOKEN, SPREADSHEET_ID, GOOGLE_CREDS_JSON]):
     raise RuntimeError("Missing required env vars")
 
 creds_dict = json.loads(GOOGLE_CREDS_JSON)
 creds = service_account.Credentials.from_service_account_info(
     creds_dict,
-    scopes=[
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
+    scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 )
+
 gc = gspread.authorize(creds)
 sh = gc.open_by_key(SPREADSHEET_ID)
 
@@ -41,7 +42,7 @@ MSK = timezone(timedelta(hours=3))
 def now_msk():
     return datetime.now(MSK)
 
-# ==================== Листы и заголовки ====================
+# ==================== Листы ====================
 STARTSTOP_SHEET = "Старт-Стоп"
 DEFECT_SHEET = "Брак"
 CTRL_STARTSTOP_SHEET = "Контр_Старт-Стоп"
@@ -55,110 +56,96 @@ def get_ws(sheet_name, headers=None):
         ws = sh.worksheet(sheet_name)
     except gspread.exceptions.WorksheetNotFound:
         ws = sh.add_worksheet(title=sheet_name, rows=3000, cols=20)
-    
     if headers and ws.row_values(1) != headers:
         ws.clear()
         ws.insert_row(headers, 1)
-    
     return ws
 
 ws_startstop = get_ws(STARTSTOP_SHEET, HEADERS_STARTSTOP)
-ws_defect    = get_ws(DEFECT_SHEET,    HEADERS_DEFECT)
+ws_defect    = get_ws(DEFECT_SHEET, HEADERS_DEFECT)
 ws_ctrl_ss   = get_ws(CTRL_STARTSTOP_SHEET)
 ws_ctrl_def  = get_ws(CTRL_DEFECT_SHEET)
 
-
 # ==================== Контролёры ====================
 def get_controllers(sheet):
-try:
-ids = sheet.col_values(1)[1:]
-return [int(i.strip()) for i in ids if i.strip().isdigit()]
-except:
-return []
-
+    try:
+        ids = sheet.col_values(1)[1:]
+        return [int(i.strip()) for i in ids if i.strip().isdigit()]
+    except:
+        return []
 
 controllers_startstop = get_controllers(ws_ctrl_ss)
 controllers_defect = get_controllers(ws_ctrl_def)
 
-
 # ==================== Последние записи ====================
 def get_last_records(ws, n=2):
-try:
-values = ws.get_all_values()
-if len(values) <= 1:
-return []
-return values[-n:]
-except:
-return []
-
+    try:
+        values = ws.get_all_values()
+        if len(values) <= 1:
+            return []
+        return values[-n:]
+    except:
+        return []
 
 # ==================== Уведомления ====================
 def notify_controllers(ids, message):
-for cid in ids:
-try:
-requests.post(
-f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-json={"chat_id": cid, "text": message, "parse_mode": "HTML"},
-timeout=10
-)
-except:
-pass
-
+    for cid in ids:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id": cid, "text": message, "parse_mode": "HTML"},
+                timeout=10
+            )
+        except:
+            pass
 
 # ==================== Запись ====================
 def append_row(data):
-flow = data.get("flow", "startstop")
-ws = ws_defect if flow == "defect" else ws_startstop
-ts = now_msk().strftime("%Y-%m-%d %H:%M:%S")
-user = data["user"]
+    flow = data.get("flow", "startstop")
+    ws = ws_defect if flow == "defect" else ws_startstop
+    ts = now_msk().strftime("%Y-%m-%d %H:%M:%S")
+    user = data["user"]
 
+    if flow == "defect":
+        row = [data["date"], data["time"], data["line"], "брак",
+               data.get("znp", ""), data["meters"],
+               data.get("defect_type", ""), user, ts, ""]
+    else:
+        row = [data["date"], data["time"], data["line"], data["action"],
+               data.get("reason", ""), data.get("znp", ""), data.get("meters",""),
+               data.get("defect_type",""), user, ts, ""]
 
-if flow == "defect":
-row = [data["date"], data["time"], data["line"], "брак",
-data.get("znp", ""), data["meters"],
-data.get("defect_type", ""), user, ts, ""]
-else:
-row = [data["date"], data["time"], data["line"], data["action"],
-data.get("reason", ""), data.get("znp", ""), data.get("meters",""),
-data.get("defect_type",""), user, ts, ""]
+    ws.append_row(row, value_input_option="USER_ENTERED")
 
-
-ws.append_row(row, value_input_option="USER_ENTERED")
-
-
-if flow == "defect":
-msg = (f"НОВАЯ ЗАПИСЬ БРАКА\n"
-f"Линия: {data['line']}\n"
-f"{data['date']} {data['time']}\n"
-f"ЗНП: <code>{data.get('znp','—')}</code>\n"
-f"Метров брака: {data['meters']}\n"
-f"Вид брака: {data.get('defect_type','—')}")
-notify_controllers(controllers_defect, msg)
-else:
-action_ru = "Запуск" if data["action"] == "запуск" else "Остановка"
-msg = (f"НОВАЯ ЗАПИСЬ СТАРТ/СТОП\n"
-f"Линия: {data['line']}\n"
-f"{data['date']} {data['time']}\n"
-f"Действие: {action_ru}\n"
-f"Причина: {data.get('reason','—')}")
-notify_controllers(controllers_startstop, msg)
-
+    if flow == "defect":
+        msg = (f"НОВАЯ ЗАПИСЬ БРАКА\n"
+               f"Линия: {data['line']}\n"
+               f"{data['date']} {data['time']}\n"
+               f"ЗНП: <code>{data.get('znp','—')}</code>\n"
+               f"Метров брака: {data['meters']}\n"
+               f"Вид брака: {data.get('defect_type','—')}")
+        notify_controllers(controllers_defect, msg)
+    else:
+        action_ru = "Запуск" if data["action"] == "запуск" else "Остановка"
+        msg = (f"НОВАЯ ЗАПИСЬ СТАРТ/СТОП\n"
+               f"Линия: {data['line']}\n"
+               f"{data['date']} {data['time']}\n"
+               f"Действие: {action_ru}\n"
+               f"Причина: {data.get('reason','—')}")
+        notify_controllers(controllers_startstop, msg)
 
 # ==================== Клавиатуры ====================
 
-
 def keyboard(rows):
-return {
-"keyboard": [[{"text": t} for t in row] for row in rows],
-"resize_keyboard": True,
-"one_time_keyboard": False
-}
-
+    return {
+        "keyboard": [[{"text": t} for t in row] for row in rows],
+        "resize_keyboard": True,
+        "one_time_keyboard": False
+    }
 
 MAIN_KB = keyboard([
-["Старт/Стоп", "Брак"]
+    ["Старт/Стоп", "Брак"]
 ])
-
 
 CANCEL_KB = keyboard([["Отмена"]])
 

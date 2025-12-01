@@ -1,4 +1,4 @@
-# V 3.4 — с цифровыми клавиатурами для линии, 4-х цифр ЗНП и метров брака
+# V 3.5 — с правильными цифровыми клавиатурами (многосимвольный ввод)
 import os
 import json
 import logging
@@ -137,7 +137,7 @@ MAIN_KB = keyboard([["Старт/Стоп", "Брак"]])
 FLOW_MENU_KB = keyboard([["Новая запись"], ["Назад"]])
 CANCEL_KB = keyboard([["Отмена"]])
 
-# Цифровые клавиатуры
+# Клавиатура для выбора линии (1–15)
 NUM_LINE_KB = {
     "keyboard": [
         [{"text": "1"}, {"text": "2"}, {"text": "3"}, {"text": "4"}, {"text": "5"}],
@@ -147,10 +147,11 @@ NUM_LINE_KB = {
     ],
     "resize_keyboard": True,
     "one_time_keyboard": True,
-    "input_field_placeholder": "Номер линии 1–15"
+    "input_field_placeholder": "Выберите линию"
 }
 
-DIGITS_4_KB = {
+# Клавиатура для ввода последних 4 цифр ЗНП
+ZNP_DIGITS_KB = {
     "keyboard": [
         [{"text": "1"}, {"text": "2"}, {"text": "3"}],
         [{"text": "4"}, {"text": "5"}, {"text": "6"}],
@@ -158,10 +159,11 @@ DIGITS_4_KB = {
         [{"text": "0"}, {"text": "Отмена"}]
     ],
     "resize_keyboard": True,
-    "one_time_keyboard": True,
-    "input_field_placeholder": "Последние 4 цифры"
+    "one_time_keyboard": False,  # ← Остаётся, можно набирать 1234
+    "input_field_placeholder": "Введите 1234"
 }
 
+# Клавиатура для ввода метров брака
 METERS_KB = {
     "keyboard": [
         [{"text": "1"}, {"text": "2"}, {"text": "3"}],
@@ -170,8 +172,8 @@ METERS_KB = {
         [{"text": "0"}, {"text": "Отмена"}]
     ],
     "resize_keyboard": True,
-    "one_time_keyboard": True,
-    "input_field_placeholder": "Количество метров"
+    "one_time_keyboard": False,  # ← Остаётся, можно набрать 999
+    "input_field_placeholder": "Например: 999"
 }
 
 REASONS_CACHE = {"kb": None, "until": 0}
@@ -243,7 +245,6 @@ def process(uid, chat, text, user_repr):
         send(chat, "Отменено.", MAIN_KB)
         return
 
-    # === Выбор раздела ===
     if uid not in states:
         if text in ("/start", "Старт/Стоп"):
             send(chat, "<b>Старт/Стоп</b>\nВыберите действие:", FLOW_MENU_KB)
@@ -259,7 +260,6 @@ def process(uid, chat, text, user_repr):
 
     flow = states[uid]["flow"]
 
-    # === Новая запись ===
     if text == "Новая запись":
         if flow == "defect":
             records = get_last_records(ws_defect, 2)
@@ -287,10 +287,9 @@ def process(uid, chat, text, user_repr):
             send(chat, msg)
             states[uid].update({"step": "line", "data": {}})
 
-        send(chat, "Введите номер линии (1–15):", NUM_LINE_KB)  # Цифровая!
+        send(chat, "Введите номер линии (1–15):", NUM_LINE_KB)
         return
 
-    # === Процесс ввода ===
     if "step" not in states[uid]:
         send(chat, "Выберите действие:", FLOW_MENU_KB)
         return
@@ -299,6 +298,7 @@ def process(uid, chat, text, user_repr):
     step = st["step"]
     data = st["data"]
 
+    # ---------- Линия ----------
     if step == "line":
         if not (text.isdigit() and 1 <= int(text) <= 15):
             send(chat, "Номер линии 1–15:", NUM_LINE_KB)
@@ -310,6 +310,7 @@ def process(uid, chat, text, user_repr):
         send(chat, "Дата:", keyboard([[today, yest], ["Другая дата", "Отмена"]]))
         return
 
+    # ---------- Дата ----------
     if step == "date":
         if text == "Другая дата":
             st["step"] = "date_custom"
@@ -341,6 +342,7 @@ def process(uid, chat, text, user_repr):
             send(chat, "Формат дд.мм.гггг", CANCEL_KB)
         return
 
+    # ---------- Время ----------
     if step == "time":
         if text == "Другое время":
             st["step"] = "time_custom"
@@ -378,6 +380,7 @@ def process(uid, chat, text, user_repr):
             send(chat, "Действие:", keyboard([["Запуск", "Остановка"], ["Отмена"]]))
         return
 
+    # ---------- Дальше без изменений (action, reason, znp_prefix, znp_manual, meters, defect_type) ----------
     if step == "action":
         if text not in ("Запуск", "Остановка"):
             send(chat, "Выберите:", keyboard([["Запуск", "Остановка"], ["Отмена"]]))
@@ -422,7 +425,7 @@ def process(uid, chat, text, user_repr):
         valid = [f"D{curr}", f"L{curr}", f"D{prev}", f"L{prev}"]
         if text in valid:
             data["znp_prefix"] = text
-            send(chat, f"Последние 4 цифры для <b>{text}</b>-XXXX:", DIGITS_4_KB)  # Цифровая!
+            send(chat, f"Последние 4 цифры для <b>{text}</b>-XXXX:", ZNP_DIGITS_KB)
             return
         if text == "Другое":
             st["step"] = "znp_manual"
@@ -431,7 +434,7 @@ def process(uid, chat, text, user_repr):
         if text.isdigit() and len(text) == 4 and "znp_prefix" in data:
             data["znp"] = f"{data['znp_prefix']}-{text}"
             st["step"] = "meters"
-            send(chat, "Метров брака:", METERS_KB)  # Цифровая!
+            send(chat, "Метров брака:", METERS_KB)
             return
         send(chat, "Выберите префикс:", keyboard([[f"D{curr}", f"L{curr}"], [f"D{prev}", f"L{prev}"], ["Другое", "Отмена"]]))
         return
@@ -442,14 +445,14 @@ def process(uid, chat, text, user_repr):
         if len(text) == 10 and text[5] == "-" and text[:5].upper() in [f"D{curr}", f"L{curr}", f"D{prev}", f"L{prev}"]:
             data["znp"] = text.upper()
             st["step"] = "meters"
-            send(chat, "Метров брака:", METERS_KB)  # Цифровая!
+            send(chat, "Метров брака:", METERS_KB)
             return
         send(chat, "Неправильно. Пример: <code>D1125-1234</code>", CANCEL_KB)
         return
 
     if step == "meters":
-        if not text.isdigit():
-            send(chat, "Только цифры:", METERS_KB)
+        if not text.isdigit() or int(text) <= 0:
+            send(chat, "Введите количество метров (число > 0):", METERS_KB)
             return
         data["meters"] = text
         st["step"] = "defect_type"

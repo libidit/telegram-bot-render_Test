@@ -226,33 +226,45 @@ def find_last_active_record(ws, user_repr):
 def process(uid, chat, text, user_repr):
     last_activity[uid] = time.time()
 
+    # Инициализация состояния для нового пользователя
+    if uid not in states:
+        states[uid] = {"chat": chat, "cancel_used": False}
+
+    state = states[uid]
+
+    # === Главные команды ===
     if text == "Назад":
         states.pop(uid, None)
         send(chat, "Главное меню:", MAIN_KB)
         return
 
     if text == "Отмена":
-        states.pop(uid, None)
+        state.pop("pending_cancel", None)
         send(chat, "Отменено.", MAIN_KB)
         return
 
-    if uid not in states:
+    # === Выбор потока ===
+    if "flow" not in state:
         if text in ("/start", "Старт/Стоп"):
             send(chat, "<b>Старт/Стоп</b>\nВыберите действие:", FLOW_MENU_KB)
-            states[uid] = {"flow": "startstop", "chat": chat}
+            state.update({"flow": "startstop"})
             return
         elif text == "Брак":
             send(chat, "<b>Брак</b>\nВыберите действие:", FLOW_MENU_KB)
-            states[uid] = {"flow": "defect", "chat": chat}
+            state.update({"flow": "defect"})
             return
         else:
             send(chat, "Выберите действие:", MAIN_KB)
             return
 
-    flow = states[uid]["flow"]
+    flow = state["flow"]
 
     # === Запрос на отмену ===
     if text == "Отменить последнюю запись":
+        if state.get("cancel_used", False):
+            send(chat, "Вы уже отменили одну запись в этом сеансе. Сделайте новую запись, чтобы снова отменить.", FLOW_MENU_KB)
+            return
+
         ws = ws_defect if flow == "defect" else ws_startstop
         row, row_num = find_last_active_record(ws, user_repr)
 
@@ -260,11 +272,7 @@ def process(uid, chat, text, user_repr):
             send(chat, "У вас нет активных записей для отмены.", FLOW_MENU_KB)
             return
 
-        states[uid]["pending_cancel"] = {
-            "ws": ws,
-            "row": row,
-            "row_num": row_num
-        }
+        state["pending_cancel"] = {"ws": ws, "row": row, "row_num": row_num}
 
         if flow == "startstop":
             action = "Запуск" if row[3] == "запуск" else "Остановка"
@@ -285,9 +293,10 @@ def process(uid, chat, text, user_repr):
         return
 
     # === Подтверждение отмены ===
-    if "pending_cancel" in states[uid]:
+    if "pending_cancel" in state:
+        pend = state["pending_cancel"]
+
         if text == "Да, отменить":
-            pend = states[uid]["pending_cancel"]
             ws = pend["ws"]
             row = pend["row"]
             row_num = pend["row_num"]
@@ -307,42 +316,47 @@ def process(uid, chat, text, user_repr):
                     f"Линия: {row[2]}\n{row[0]} {row[1]}\nЗНП: <code>{row[4]}</code>\nМетров: {row[5]}")
                 send(chat, f"Запись брака отменена:\n{row[0]} {row[1]} | Линия {row[2]}", FLOW_MENU_KB)
 
-            states[uid].pop("pending_cancel", None)
+            state["cancel_used"] = True
+            state.pop("pending_cancel", None)
             return
 
         if text == "Нет, оставить":
             send(chat, "Отмена отменена. Запись сохранена.", FLOW_MENU_KB)
-            states[uid].pop("pending_cancel", None)
+            state.pop("pending_cancel", None)
             return
 
     # === Новая запись ===
     if text == "Новая запись":
+        state["cancel_used"] = False  # сброс флага отмены
+
         if flow == "defect":
             records = get_last_records(ws_defect, 2)
             msg = "<b>Последние записи Брака:</b>\n\n"
             msg += "\n".join(f"• {r[0]} {r[1]} | Линия {r[2]} | <code>{r[4] if len(r)>4 else '—'}</code> | {r[5] if len(r)>5 else '—'}м"
                              for r in records) if records else "Нет записей."
             send(chat, msg)
-            states[uid].update({"step": "line", "data": {"action": "брак"}})
+            state.update({"step": "line", "data": {"action": "брак"}})
         else:
             records = get_last_records(ws_startstop, 2)
             msg = "<b>Последние записи Старт/Стоп:</b>\n\n"
             msg += "\n".join(f"• {r[0]} {r[1]} | Линия {r[2]} | {'Запуск' if r[3]=='запуск' else 'Остановка'} | {r[4] if len(r)>4 else '—'}"
                              for r in records) if records else "Нет записей."
             send(chat, msg)
-            states[uid].update({"step": "line", "data": {}})
+            state.update({"step": "line", "data": {}})
 
         send(chat, "Введите номер линии (1–15):", NUM_LINE_KB)
         return
 
-    if "step" not in states[uid]:
+    # === Обработка шагов записи ===
+    st = state
+    step = st.get("step")
+    data = st.get("data", {})
+
+    if not step:
         send(chat, "Выберите действие:", FLOW_MENU_KB)
         return
 
-    st = states[uid]
-    step = st["step"]
-    data = st["data"]
-
+    # --- Step: line ---
     if step == "line":
         if not (text.isdigit() and 1 <= int(text) <= 15):
             send(chat, "Номер линии должен быть от 1 до 15:", NUM_LINE_KB)
@@ -354,6 +368,7 @@ def process(uid, chat, text, user_repr):
         send(chat, "Дата:", keyboard([[today, yest], ["Другая дата", "Отмена"]]))
         return
 
+    # --- Step: date ---
     if step == "date":
         if text == "Другая дата":
             st["step"] = "date_custom"
@@ -385,7 +400,8 @@ def process(uid, chat, text, user_repr):
             send(chat, "Введите дату в формате дд.мм.гггг", CANCEL_KB)
         return
 
-    if step == "time":
+    # --- Step: time ---
+    if step in ("time", "time_custom"):
         if text == "Другое время":
             st["step"] = "time_custom"
             send(chat, "Введите время (чч:мм):", CANCEL_KB)
@@ -405,22 +421,7 @@ def process(uid, chat, text, user_repr):
             send(chat, "Действие:", keyboard([["Запуск", "Остановка"], ["Отмена"]]))
         return
 
-    if step == "time_custom":
-        if not (len(text) == 5 and text[2] == ":" and text[:2].isdigit() and text[3:].isdigit()):
-            send(chat, "Формат времени: чч:мм", CANCEL_KB)
-            return
-        data["time"] = text
-        if flow == "defect":
-            st["step"] = "znp_prefix"
-            curr = now_msk().strftime("%m%y")
-            prev = (now_msk() - timedelta(days=35)).strftime("%m%y")
-            kb = [[f"D{curr}", f"L{curr}"], [f"D{prev}", f"L{prev}"], ["Другое", "Отмена"]]
-            send(chat, "Префикс ЗНП:", keyboard(kb))
-        else:
-            st["step"] = "action"
-            send(chat, "Действие:", keyboard([["Запуск", "Остановка"], ["Отмена"]]))
-        return
-
+    # --- Step: action ---
     if step == "action":
         if text not in ("Запуск", "Остановка"):
             send(chat, "Выберите действие:", keyboard([["Запуск", "Остановка"], ["Отмена"]]))
@@ -437,8 +438,9 @@ def process(uid, chat, text, user_repr):
             send(chat, "Причина остановки:", get_reasons_kb())
         return
 
-    if step == "reason":
-        if text == "Другое":
+    # --- Step: reason ---
+    if step in ("reason", "reason_custom"):
+        if text == "Другое" and step == "reason":
             st["step"] = "reason_custom"
             send(chat, "Введите причину остановки:", CANCEL_KB)
             return
@@ -450,46 +452,39 @@ def process(uid, chat, text, user_repr):
         send(chat, "Префикс ЗНП:", keyboard(kb))
         return
 
-    if step == "reason_custom":
-        data["reason"] = text
-        st["step"] = "znp_prefix"
-        curr = now_msk().strftime("%m%y")
-        prev = (now_msk() - timedelta(days=35)).strftime("%m%y")
-        kb = [[f"D{curr}", f"L{curr}"], [f"D{prev}", f"L{prev}"], ["Другое", "Отмена"]]
-        send(chat, "Префикс ЗНП:", keyboard(kb))
-        return
-
-    if step == "znp_prefix":
+    # --- Step: znp_prefix / znp_manual ---
+    if step in ("znp_prefix", "znp_manual"):
         curr = now_msk().strftime("%m%y")
         prev = (now_msk() - timedelta(days=35)).strftime("%m%y")
         valid = [f"D{curr}", f"L{curr}", f"D{prev}", f"L{prev}"]
-        if text in valid:
-            data["znp_prefix"] = text
-            send(chat, f"Последние 4 цифры ЗНП для <b>{text}</b>-XXXX:", CANCEL_KB)
-            return
-        if text == "Другое":
-            st["step"] = "znp_manual"
-            send(chat, "Введите полный ЗНП (например, D1225-1234):", CANCEL_KB)
-            return
-        if text.isdigit() and len(text) == 4 and "znp_prefix" in data:
-            data["znp"] = f"{data['znp_prefix']}-{text}"
-            st["step"] = "meters"
-            send(chat, "Сколько метров брака?", CANCEL_KB)
-            return
-        send(chat, "Выберите префикс:", keyboard([[f"D{curr}", f"L{curr}"], [f"D{prev}", f"L{prev}"], ["Другое", "Отмена"]]))
-        return
 
-    if step == "znp_manual":
-        curr = now_msk().strftime("%m%y")
-        prev = (now_msk() - timedelta(days=35)).strftime("%m%y")
-        if len(text) == 10 and text[5] == "-" and text[:5].upper() in [f"D{curr}", f"L{curr}", f"D{prev}", f"L{prev}"]:
-            data["znp"] = text.upper()
-            st["step"] = "meters"
-            send(chat, "Сколько метров брака?", CANCEL_KB)
+        if step == "znp_prefix":
+            if text in valid:
+                data["znp_prefix"] = text
+                send(chat, f"Последние 4 цифры ЗНП для <b>{text}</b>-XXXX:", CANCEL_KB)
+                return
+            if text == "Другое":
+                st["step"] = "znp_manual"
+                send(chat, "Введите полный ЗНП (например, D1225-1234):", CANCEL_KB)
+                return
+            if text.isdigit() and len(text) == 4 and "znp_prefix" in data:
+                data["znp"] = f"{data['znp_prefix']}-{text}"
+                st["step"] = "meters"
+                send(chat, "Сколько метров брака?", CANCEL_KB)
+                return
+            send(chat, "Выберите префикс:", keyboard([[f"D{curr}", f"L{curr}"], [f"D{prev}", f"L{prev}"], ["Другое", "Отмена"]]))
             return
-        send(chat, "Неправильный формат ЗНП.\nПример: <code>D1225-1234</code>", CANCEL_KB)
-        return
 
+        if step == "znp_manual":
+            if len(text) == 10 and text[5] == "-" and text[:5].upper() in valid:
+                data["znp"] = text.upper()
+                st["step"] = "meters"
+                send(chat, "Сколько метров брака?", CANCEL_KB)
+                return
+            send(chat, "Неправильный формат ЗНП.\nПример: <code>D1225-1234</code>", CANCEL_KB)
+            return
+
+    # --- Step: meters ---
     if step == "meters":
         if not text.isdigit() or int(text) <= 0:
             send(chat, "Укажите количество метров брака (число > 0):", CANCEL_KB)
@@ -499,21 +494,13 @@ def process(uid, chat, text, user_repr):
         send(chat, "Вид брака:", get_defect_kb())
         return
 
-    if step == "defect_type":
-        if text == "Другое":
+    # --- Step: defect_type / defect_custom ---
+    if step in ("defect_type", "defect_custom"):
+        if text == "Другое" and step == "defect_type":
             st["step"] = "defect_custom"
             send(chat, "Опишите вид брака:", CANCEL_KB)
             return
         data["defect_type"] = "" if text == "Без брака" else text
-        data["user"] = user_repr
-        data["flow"] = flow
-        append_row(data)
-        send(chat, f"<b>Записано!</b>\nЛиния {data['line']} • {data['date']} {data['time']}", MAIN_KB)
-        states.pop(uid, None)
-        return
-
-    if step == "defect_custom":
-        data["defect_type"] = text
         data["user"] = user_repr
         data["flow"] = flow
         append_row(data)

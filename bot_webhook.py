@@ -1,4 +1,4 @@
-# V 3.7 — Отмена последней записи в Старт/Стоп (по пользователю)
+# V 3.8 — Отмена последней записи в Старт/Стоп и в Брак
 import os
 import json
 import logging
@@ -67,6 +67,7 @@ def get_controllers(sheet_name):
         return []
 
 controllers_startstop = get_controllers(CTRL_STARTSTOP_SHEET)
+controllers_defect = get_controllers(CTRL_DEFECT_SHEET)
 
 # ==================== Последние записи ====================
 def get_last_records(ws, n=2):
@@ -78,38 +79,59 @@ def get_last_records(ws, n=2):
     except:
         return []
 
-# ==================== ОТМЕНА ПОСЛЕДНЕЙ ЗАПИСИ (Старт/Стоп) ====================
+# ==================== ОТМЕНА — СТАРТ/СТОП ====================
 def cancel_last_startstop(user_repr):
     try:
         values = ws_startstop.get_all_values()
         if len(values) <= 1:
-            return "Нет записей в таблице."
+            return "Нет записей в таблице Старт-Стоп."
 
-        # Ищем снизу вверх
         for i in range(len(values) - 1, 0, -1):
             row = values[i]
             if len(row) < 9:
                 continue
-            user_in_sheet = row[8].strip()
-            status_cell = row[10] if len(row) > 10 else ""
-            if user_in_sheet == user_repr and status_cell != "ОТМЕНЕНО":
-                # Отменяем
+            if row[8].strip() == user_repr and (len(row) <= 10 or row[10].strip() != "ОТМЕНЕНО"):
                 ws_startstop.update(f'K{i+1}', [['ОТМЕНЕНО']])
                 action = "Запуск" if row[3] == "запуск" else "Остановка"
-                msg = (f"ОТМЕНЕНА ЗАПИСЬ\n"
+                msg = (f"ОТМЕНЕНА ЗАПИСЬ СТАРТ/СТОП\n"
                        f"Пользователь: {user_repr}\n"
                        f"Линия: {row[2]}\n"
                        f"{row[0]} {row[1]}\n"
                        f"Действие: {action}\n"
                        f"Причина: {row[4] if len(row)>4 else '—'}")
                 notify_controllers(controllers_startstop, msg)
-                return (f"Отменена запись:\n"
-                        f"{row[0]} {row[1]} | Линия {row[2]} | {action}\n"
-                        f"Причина: {row[4] if len(row)>4 else '—'}")
-        return "У вас нет активных записей для отмены."
+                return f"Отменена запись:\n{row[0]} {row[1]} | Линия {row[2]} | {action}\nПричина: {row[4] if len(row)>4 else '—'}"
+        return "У вас нет активных записей Старт/Стоп для отмены."
     except Exception as e:
-        log.exception(f"Ошибка отмены: {e}")
-        return "Ошибка при отмене записи."
+        log.exception("Ошибка отмены Старт/Стоп")
+        return "Ошибка при отмене."
+
+# ==================== ОТМЕНА — БРАК ====================
+def cancel_last_defect(user_repr):
+    try:
+        values = ws_defect.get_all_values()
+        if len(values) <= 1:
+            return "Нет записей в таблице Брак."
+
+        for i in range(len(values) - 1, 0, -1):
+            row = values[i]
+            if len(row) < 8:
+                continue
+            if row[7].strip() == user_repr and (len(row) <= 9 or row[9].strip() != "ОТМЕНЕНО"):
+                ws_defect.update(f'J{i+1}', [['ОТМЕНЕНО']])
+                msg = (f"ОТМЕНЕНА ЗАПИСЬ БРАКА\n"
+                       f"Пользователь: {user_repr}\n"
+                       f"Линия: {row[2]}\n"
+                       f"{row[0]} {row[1]}\n"
+                       f"ЗНП: <code>{row[4]}</code>\n"
+                       f"Метров: {row[5]}\n"
+                       f"Вид брака: {row[6] if len(row)>6 else '—'}")
+                notify_controllers(controllers_defect, msg)
+                return f"Отменена запись брака:\n{row[0]} {row[1]} | Линия {row[2]}\nЗНП: <code>{row[4]}</code>\nМетров: {row[5]}"
+        return "У вас нет активных записей брака для отмены."
+    except Exception as e:
+        log.exception("Ошибка отмены Брак")
+        return "Ошибка при отмене записи брака."
 
 # ==================== Уведомления ====================
 def notify_controllers(ids, message):
@@ -140,7 +162,7 @@ def append_row(data):
                f"ЗНП: <code>{data.get('znp','—')}</code>\n"
                f"Метров брака: {data['meters']}\n"
                f"Вид брака: {data.get('defect_type','—')}")
-        notify_controllers(get_controllers(CTRL_DEFECT_SHEET), msg)
+        notify_controllers(controllers_defect, msg)
     else:
         row = [data["date"], data["time"], data["line"], data["action"],
                data.get("reason", ""), data.get("znp", ""), data.get("meters",""),
@@ -164,14 +186,7 @@ def keyboard(rows):
     }
 
 MAIN_KB = keyboard([["Старт/Стоп", "Брак"]])
-
-# Меню с кнопкой отмены
-FLOW_MENU_STARTSTOP_KB = keyboard([
-    ["Новая запись"],
-    ["Отменить последнюю запись"],
-    ["Назад"]
-])
-FLOW_MENU_DEFECT_KB = keyboard([["Новая запись"], ["Назад"]])
+FLOW_MENU_KB = keyboard([["Новая запись"], ["Отменить последнюю запись"], ["Назад"]])
 CANCEL_KB = keyboard([["Отмена"]])
 
 NUM_LINE_KB = {
@@ -255,14 +270,13 @@ def process(uid, chat, text, user_repr):
         send(chat, "Отменено.", MAIN_KB)
         return
 
-    # === Главное меню ===
     if uid not in states:
         if text in ("/start", "Старт/Стоп"):
-            send(chat, "<b>Старт/Стоп</b>\nВыберите действие:", FLOW_MENU_STARTSTOP_KB)
+            send(chat, "<b>Старт/Стоп</b>\nВыберите действие:", FLOW_MENU_KB)
             states[uid] = {"flow": "startstop", "chat": chat}
             return
         elif text == "Брак":
-            send(chat, "<b>Брак</b>\nВыберите действие:", FLOW_MENU_DEFECT_KB)
+            send(chat, "<b>Брак</b>\nВыберите действие:", FLOW_MENU_KB)
             states[uid] = {"flow": "defect", "chat": chat}
             return
         else:
@@ -272,9 +286,12 @@ def process(uid, chat, text, user_repr):
     flow = states[uid]["flow"]
 
     # === Отмена последней записи ===
-    if text == "Отменить последнюю запись" and flow == "startstop":
-        result = cancel_last_startstop(user_repr)
-        send(chat, result, FLOW_MENU_STARTSTOP_KB)
+    if text == "Отменить последнюю запись":
+        if flow == "startstop":
+            result = cancel_last_startstop(user_repr)
+        else:
+            result = cancel_last_defect(user_repr)
+        send(chat, result, FLOW_MENU_KB)
         return
 
     # === Новая запись ===
@@ -282,7 +299,7 @@ def process(uid, chat, text, user_repr):
         if flow == "defect":
             records = get_last_records(ws_defect, 2)
             msg = "<b>Последние записи Брака:</b>\n\n"
-            msg += "\n".join(f"• {r[0]} {r[1]} | Линия {r[2]} | <code>{r[4] if len(r)>4 else '—'}</code> | {r[5] if len(r)>5 else '—'}м | {r[6] if len(r)>6 else '—'}"
+            msg += "\n".join(f"• {r[0]} {r[1]} | Линия {r[2]} | <code>{r[4] if len(r)>4 else '—'}</code> | {r[5] if len(r)>5 else '—'}м"
                              for r in records) if records else "Нет записей."
             send(chat, msg)
             states[uid].update({"step": "line", "data": {"action": "брак"}})
@@ -298,14 +315,13 @@ def process(uid, chat, text, user_repr):
         return
 
     if "step" not in states[uid]:
-        send(chat, "Выберите действие:", FLOW_MENU_STARTSTOP_KB if flow == "startstop" else FLOW_MENU_DEFECT_KB)
+        send(chat, "Выберите действие:", FLOW_MENU_KB)
         return
 
     st = states[uid]
     step = st["step"]
     data = st["data"]
 
-    # ---------- Линия ----------
     if step == "line":
         if not (text.isdigit() and 1 <= int(text) <= 15):
             send(chat, "Номер линии должен быть от 1 до 15:", NUM_LINE_KB)
@@ -317,7 +333,6 @@ def process(uid, chat, text, user_repr):
         send(chat, "Дата:", keyboard([[today, yest], ["Другая дата", "Отмена"]]))
         return
 
-    # ---------- Дата ----------
     if step == "date":
         if text == "Другая дата":
             st["step"] = "date_custom"
@@ -349,7 +364,6 @@ def process(uid, chat, text, user_repr):
             send(chat, "Введите дату в формате дд.мм.гггг", CANCEL_KB)
         return
 
-    # ---------- Время ----------
     if step == "time":
         if text == "Другое время":
             st["step"] = "time_custom"
@@ -358,7 +372,7 @@ def process(uid, chat, text, user_repr):
         if not (len(text) == 5 and text[2] == ":" and text[:2].isdigit() and text[3:].isdigit()):
             send(chat, "Неверный формат времени.", CANCEL_KB)
             return
-        data["time"] = text + now_msk().strftime(":%S")
+        data["time"] = text
         if flow == "defect":
             st["step"] = "znp_prefix"
             curr = now_msk().strftime("%m%y")
@@ -386,7 +400,6 @@ def process(uid, chat, text, user_repr):
             send(chat, "Действие:", keyboard([["Запуск", "Остановка"], ["Отмена"]]))
         return
 
-    # ---------- Остальные шаги (без изменений) ----------
     if step == "action":
         if text not in ("Запуск", "Остановка"):
             send(chat, "Выберите действие:", keyboard([["Запуск", "Остановка"], ["Отмена"]]))
@@ -499,7 +512,7 @@ def process(uid, chat, text, user_repr):
         states.pop(uid, None)
         return
 
-    send(chat, "Выберите действие:", FLOW_MENU_STARTSTOP_KB if flow == "startstop" else FLOW_MENU_DEFECT_KB)
+    send(chat, "Выберите действие:", FLOW_MENU_KB)
 
 # ==================== Flask ====================
 app = Flask(__name__)

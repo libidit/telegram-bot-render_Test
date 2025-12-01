@@ -194,13 +194,19 @@ def keyboard(rows):
         "input_field_placeholder": "Выберите действие"
     }
 
+# Главное меню
 MAIN_KB = keyboard([
-    ["Старт/Стоп", "Брак"],
-    ["Отменить последнюю запись"]
+    ["Старт/Стоп", "Брак"]
+])
+
+# Подменю для каждого потока
+FLOW_MENU_KB = keyboard([
+    ["Новая запись", "Отменить последнюю запись"],
+    ["Назад"]
 ])
 
 CANCEL_KB = keyboard([["Отмена"]])
-CONFIRM_KB = keyboard([["Да, удалить", "Нет"]])
+CONFIRM_DELETE_KB = keyboard([["Да, удалить", "Нет"]])
 
 REASONS_CACHE = {"kb": None, "until": 0}
 DEFECTS_CACHE = {"kb": None, "until": 0}
@@ -240,6 +246,36 @@ def send(chat_id, text, markup=None):
     except Exception as e:
         log.exception(f"send error: {e}")
 
+# ==================== Поиск последней записи пользователя в конкретном листе ====================
+def find_last_user_entry(uid, worksheet):
+    try:
+        values = worksheet.get_all_values()
+        if len(values) <= 1: 
+            return None
+        for i in range(len(values)-1, 0, -1):
+            row = values[i]
+            if len(row) >= 9 and str(uid) in row[8]:  # колонка 9 (индекс 8) — Пользователь
+                if len(row) >= 11 and row[10].strip() == "Удалено":
+                    continue  # пропускаем уже удалённые
+                return i + 1, row  # номер строки и данные
+    except Exception as e:
+        log.error(f"find_last_user_entry error: {e}")
+    return None
+
+# ==================== Пометить как удалено ====================
+def mark_as_deleted(ws, row_index):
+    try:
+        ws.update_cell(row_index, 11, "Удалено")  # колонка Статус
+        row = ws.row_values(row_index)
+        sheet_name = ws.title
+        if sheet_name == "Брак":
+            notify_controllers(controllers_defect, f"ЗАПИСЬ БРАКА УДАЛЕНА\nЛиния {row[2]}\n{row[0]} {row[1]}\nЗНП: <code>{row[4]}</code>\nМетров: {row[5]}")
+        else:
+            action = "Запуск" if row[3] == "запуск" else "Остановка"
+            notify_controllers(controllers_startstop, f"ЗАПИСЬ СТАРТ/СТОП УДАЛЕНА\nЛиния {row[2]}\n{row[0]} {row[1]}\nДействие: {action}\nПричина: {row[4] if len(row)>4 else '—'}")
+    except Exception as e:
+        log.error(f"mark_as_deleted error: {e}")
+
 # ==================== Таймауты ====================
 states = {}
 last_activity = {}
@@ -261,11 +297,11 @@ threading.Thread(target=timeout_worker, daemon=True).start()
 def process(uid, chat, text, user_repr):
     last_activity[uid] = time.time()
 
-    # === Подтверждение удаления ===
-    if uid in states and states[uid].get("step") == "delete_confirm":
+    # Подтверждение удаления
+    if states.get(uid, {}).get("step") == "confirm_delete":
         if text == "Да, удалить":
-            ws = states[uid]["data"]["ws"]
-            row_index = states[uid]["data"]["row_index"]
+            ws = states[uid]["ws"]
+            row_index = states[uid]["row_index"]
             mark_as_deleted(ws, row_index)
             send(chat, "Запись помечена как <b>Удалено</b>.", MAIN_KB)
         else:
@@ -273,72 +309,104 @@ def process(uid, chat, text, user_repr):
         states.pop(uid, None)
         return
 
-    # === Главное меню + последние записи ===
+    # Возврат назад в главное меню
+    if text == "Назад":
+        states.pop(uid, None)
+        send(chat, "Главное меню:", MAIN_KB)
+        return
+
+    # Выбор потока
     if uid not in states:
         if text in ("/start", "Старт/Стоп"):
-            records = get_last_records(ws_startstop, 2)
-            msg = "<b>Последние записи Старт/Стоп:</b>\n\n"
-            if not records:
-                msg += "Нет записей."
-            else:
-                for r in records:
-                    action = "Запуск" if r[3] == "запуск" else "Остановка"
-                    reason = r[4] if len(r) > 4 else "—"
-                    msg += f"• {r[0]} {r[1]} | Линия {r[2]} | {action} | {reason}\n"
-            send(chat, msg)
-            states[uid] = {"step": "line", "data": {}, "chat": chat, "flow": "startstop"}
-            send(chat, "Введите номер линии (1–15):", CANCEL_KB)
+            send(chat, "<b>Старт/Стоп</b>\nВыберите действие:", FLOW_MENU_KB)
+            states[uid] = {"flow": "startstop", "chat": chat}
             return
-
         if text == "Брак":
-            records = get_last_records(ws_defect, 2)
-            msg = "<b>Последние записи Брака:</b>\n\n"
-            if not records:
-                msg += "Нет записей."
+            send(chat, "<b>Брак</b>\nВыберите действие:", FLOW_MENU_KB)
+            states[uid] = {"flow": "defect", "chat": chat}
+            return
+        send(chat, "Выберите действие:", MAIN_KB)
+        return
+
+    flow = states[uid]["flow"]
+
+    # Обработка подменю
+    if "awaiting_flow_choice" not in states[uid]:
+        if text == "Новая запись":
+            states[uid]["awaiting_flow_choice"] = True
+            if flow == "defect":
+                records = get_last_records(ws_defect, 2)
+                msg = "<b>Последние записи Брака:</b>\n\n"
+                if not records:
+                    msg += "Нет записей."
+                else:
+                    for r in records:
+                        znp = r[4] if len(r)>4 else "—"
+                        meters = r[5] if len(r)>5 else "—"
+                        defect = r[6] if len(r)>6 else "—"
+                        msg += f"• {r[0]} {r[1]} | Линия {r[2]} | <code>{znp}</code> | {meters}м | {defect}\n"
+                send(chat, msg)
+                states[uid].update({"step": "line", "data": {"action": "брак"}, "flow": "defect"})
             else:
-                for r in records:
-                    znp = r[4] if len(r) > 4 else "—"
-                    meters = r[5] if len(r) > 5 else "—"
-                    defect = r[6] if len(r) > 6 else "—"
-                    msg += f"• {r[0]} {r[1]} | Линия {r[2]} | <code>{znp}</code> | {meters}м | {defect}\n"
-            send(chat, msg)
-            states[uid] = {"step": "line", "data": {"action": "брак"}, "chat": chat, "flow": "defect"}
+                records = get_last_records(ws_startstop, 2)
+                msg = "<b>Последние записи Старт/Стоп:</b>\n\n"
+                if not records:
+                    msg += "Нет записей."
+                else:
+                    for r in records:
+                        action = "Запуск" if r[3] == "запуск" else "Остановка"
+                        reason = r[4] if len(r)>4 else "—"
+                        msg += f"• {r[0]} {r[1]} | Линия {r[2]} | {action} | {reason}\n"
+                send(chat, msg)
+                states[uid].update({"step": "line", "data": {}, "flow": "startstop"})
             send(chat, "Введите номер линии (1–15):", CANCEL_KB)
             return
 
         if text == "Отменить последнюю запись":
-            success, sheet_name, row, ws, row_index = find_last_entry(uid)
-            if not success:
-                send(chat, "У вас нет записей для отмены.", MAIN_KB)
+            ws = ws_defect if flow == "defect" else ws_startstop
+            result = find_last_user_entry(uid, ws)
+            if not result:
+                send(chat, "У вас нет активных записей в этом разделе.", FLOW_MENU_KB)
                 return
-            action = row[3] if len(row) > 3 else "брак"
-            znp = row[4] if len(row) > 4 else "—"
-            meters = row[5] if len(row) > 5 else "—"
-            defect = row[6] if len(row) > 6 else "—"
-            msg = f"<b>Последняя запись ({sheet_name}):</b>\n"
+            row_index, row = result
+
+            action_text = "брак" if flow == "defect" else (row[3] if len(row)>3 else "")
+            action_ru = "Брак" if flow == "defect" else ("Запуск" if action_text == "запуск" else "Остановка")
+
+            msg = f"<b>Последняя запись найдена:</b>\n"
             msg += f"{row[0]} {row[1]} • Линия {row[2]}\n"
-            msg += f"Действие: {action}\n"
-            msg += f"ЗНП: <code>{znp}</code>\n"
-            msg += f"Брака: {meters}м | {defect}\n\n"
-            msg += "<b>Удалить эту запись?</b> (статус → «Удалено)"
-            send(chat, msg, CONFIRM_KB)
-            states[uid] = {"step": "delete_confirm", "chat": chat, "data": {"ws": ws, "row_index": row_index}}
+            msg += f"Действие: {action_ru}\n"
+            if flow == "defect":
+                msg += f"ЗНП: <code>{row[4] if len(row)>4 else '—'}</code>\n"
+                msg += f"Брака: {row[5] if len(row)>5 else '—'} м\n"
+                msg += f"Вид: {row[6] if len(row)>6 else '—'}\n"
+            else:
+                msg += f"Причина: {row[4] if len(row)>4 else '—'}\n"
+            msg += "\n<b>Удалить эту запись?</b>"
+
+            send(chat, msg, CONFIRM_DELETE_KB)
+            states[uid].update({
+                "step": "confirm_delete",
+                "ws": ws,
+                "row_index": row_index
+            })
             return
 
-        send(chat, "Выберите действие:", MAIN_KB)
+        send(chat, "Выберите действие:", FLOW_MENU_KB)
         return
 
+    # Если уже в процессе ввода новой записи — продолжаем обычную логику
     if text == "Отмена":
         states.pop(uid, None)
         send(chat, "Отменено.", MAIN_KB)
         return
-
+        
+    # ==================== Все шаги (линия → дата → время → ...) ====================
     st = states[uid]
     step = st["step"]
     data = st["data"]
     flow = st.get("flow", "startstop")
 
-    # ==================== Все шаги (линия → дата → время → ...) ====================
     if step == "line":
         if not (text.isdigit() and 1 <= int(text) <= 15):
             send(chat, "Номер линии 1–15:", CANCEL_KB); return
@@ -513,29 +581,42 @@ def process(uid, chat, text, user_repr):
              f"Брака: {data['meters']} м\n"
              f"Вид брака: {text}",
              MAIN_KB)
-        states.pop(uid, None)
-        return
+       states.pop(uid, None)
 
 # ==================== Flask ====================
 app = Flask(__name__)
 LOCK_PATH = "/tmp/bot.lock"
 
-@app.route("/health")
-def health(): return {"ok": True}
+# Автоустановка вебхука на Render
+if os.getenv("RENDER"):
+    token = os.getenv("TELEGRAM_TOKEN")
+    domain = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+    if token and domain:
+        url = f"https://{domain}/"
+        requests.get(f"https://api.telegram.org/bot{token}/setWebhook?url={url}")
+        print(f"Вебхук установлен: {url}")
 
 @app.route("/", methods=["POST"])
 def webhook():
-    upd = request.get_json(silent=True)
-    if not upd or "message" not in upd: return {"ok": True}
-    m = upd["message"]
-    chat = m["chat"]["id"]
-    uid = m["from"]["id"]
+    update = request.get_json()
+    if not update or "message" not in update:
+        return "ok", 200
+
+    m = update["message"]
+    chat_id = m["chat"]["id"]
+    user_id = m["from"]["id"]
     text = (m.get("text") or "").strip()
-    user_repr = f"{uid} (@{m['from'].get('username','') or 'no_user'})"
+    username = m["from"].get("username", "")
+    user_repr = f"{user_id} (@{username or 'no_user'})"
 
     with FileLock(LOCK_PATH):
-        process(uid, chat, text, user_repr)
-    return {"ok": True}
+        process(user_id, chat_id, text, user_repr)
+
+    return "ok", 200
+
+@app.route("/")
+def index():
+    return "Bot is running!", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))

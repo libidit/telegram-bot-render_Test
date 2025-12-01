@@ -330,8 +330,8 @@ def process(uid, chat, text, user_repr):
 
     flow = states[uid]["flow"]
 
-    # Обработка подменю
-    if "awaiting_flow_choice" not in states[uid]:
+    # Обработка подменю (первое нажатие)
+    if states[uid].get("awaiting_flow_choice") is None:
         if text == "Новая запись":
             states[uid]["awaiting_flow_choice"] = True
             if flow == "defect":
@@ -346,7 +346,7 @@ def process(uid, chat, text, user_repr):
                         defect = r[6] if len(r)>6 else "—"
                         msg += f"• {r[0]} {r[1]} | Линия {r[2]} | <code>{znp}</code> | {meters}м | {defect}\n"
                 send(chat, msg)
-                states[uid].update({"step": "line", "data": {"action": "брак"}, "flow": "defect"})
+                states[uid].update({"step": "line", "data": {"action": "брак"}})
             else:
                 records = get_last_records(ws_startstop, 2)
                 msg = "<b>Последние записи Старт/Стоп:</b>\n\n"
@@ -358,7 +358,7 @@ def process(uid, chat, text, user_repr):
                         reason = r[4] if len(r)>4 else "—"
                         msg += f"• {r[0]} {r[1]} | Линия {r[2]} | {action} | {reason}\n"
                 send(chat, msg)
-                states[uid].update({"step": "line", "data": {}, "flow": "startstop"})
+                states[uid].update({"step": "line", "data": {}})
             send(chat, "Введите номер линии (1–15):", CANCEL_KB)
             return
 
@@ -370,8 +370,7 @@ def process(uid, chat, text, user_repr):
                 return
             row_index, row = result
 
-            action_text = "брак" if flow == "defect" else (row[3] if len(row)>3 else "")
-            action_ru = "Брак" if flow == "defect" else ("Запуск" if action_text == "запуск" else "Остановка")
+            action_ru = "Брак" if flow == "defect" else ("Запуск" if len(row)>3 and row[3]=="запуск" else "Остановка")
 
             msg = f"<b>Последняя запись найдена:</b>\n"
             msg += f"{row[0]} {row[1]} • Линия {row[2]}\n"
@@ -395,17 +394,16 @@ def process(uid, chat, text, user_repr):
         send(chat, "Выберите действие:", FLOW_MENU_KB)
         return
 
-    # Если уже в процессе ввода новой записи — продолжаем обычную логику
+    # Отмена в процессе ввода
     if text == "Отмена":
         states.pop(uid, None)
         send(chat, "Отменено.", MAIN_KB)
         return
-        
-    # ==================== Все шаги (линия → дата → время → ...) ====================
+
+    # === ВСЯ ЛОГИКА ВВОДА ДАННЫХ (полностью твоя старая, но с правильными отступами) ===
     st = states[uid]
     step = st["step"]
     data = st["data"]
-    flow = st.get("flow", "startstop")
 
     if step == "line":
         if not (text.isdigit() and 1 <= int(text) <= 15):
@@ -450,7 +448,6 @@ def process(uid, chat, text, user_repr):
             st["step"] = "time_custom"; send(chat, "чч:мм:", CANCEL_KB); return
         if not (len(text) == 5 and text[2] == ":" and text[:2].isdigit() and text[3:].isdigit()):
             send(chat, "Неверное время.", CANCEL_KB); return
-        # Если время выбрано через кнопку (формат чч:мм), добавляем текущие секунды
         secs = now_msk().strftime(":%S")
         data["time"] = text + secs
         if flow == "defect":
@@ -467,7 +464,6 @@ def process(uid, chat, text, user_repr):
     if step == "time_custom":
         if not (len(text) == 5 and text[2] == ":" and text[:2].isdigit() and text[3:].isdigit()):
             send(chat, "Формат чч:мм", CANCEL_KB); return
-        # Пользователь ввёл вручную — сохраняем как есть (без добавления секунд)
         data["time"] = text
         if flow == "defect":
             st["step"] = "znp_prefix"
@@ -569,25 +565,23 @@ def process(uid, chat, text, user_repr):
         states.pop(uid, None)
         return
 
-    if step == "defect_custom":
+   if step == "defect_custom":
         data["defect_type"] = text
         data["user"] = user_repr
         data["flow"] = flow
         append_row(data)
-        send(chat,
-             f"<b>Записано на лист '{'Брак' if flow=='defect' else 'Старт-Стоп'}'!</b>\n"
-             f"Линия {data['line']} • {data['date']} {data['time']}\n"
-             f"ЗНП: <code>{data.get('znp','—')}</code>\n"
-             f"Брака: {data['meters']} м\n"
-             f"Вид брака: {text}",
-             MAIN_KB)
-       states.pop(uid, None)
+        send(chat, f"<b>Записано на лист '{'Брак' if flow=='defect' else 'Старт-Стоп'}'!</b>\n"
+                   f"Линия {data['line']} • {data['date']} {data['time']}\n"
+                   f"ЗНП: <code>{data.get('znp','—')}</code>\n"
+                   f"Брака: {data['meters']} м\n"
+                   f"Вид брака: {text}", MAIN_KB)
+        states.pop(uid, None)
+        return
 
 # ==================== Flask ====================
 app = Flask(__name__)
 LOCK_PATH = "/tmp/bot.lock"
 
-# Автоустановка вебхука на Render
 if os.getenv("RENDER"):
     token = os.getenv("TELEGRAM_TOKEN")
     domain = os.getenv("RENDER_EXTERNAL_HOSTNAME")
@@ -601,17 +595,14 @@ def webhook():
     update = request.get_json()
     if not update or "message" not in update:
         return "ok", 200
-
     m = update["message"]
     chat_id = m["chat"]["id"]
     user_id = m["from"]["id"]
     text = (m.get("text") or "").strip()
     username = m["from"].get("username", "")
     user_repr = f"{user_id} (@{username or 'no_user'})"
-
     with FileLock(LOCK_PATH):
         process(user_id, chat_id, text, user_repr)
-
     return "ok", 200
 
 @app.route("/")

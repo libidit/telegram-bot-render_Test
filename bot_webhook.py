@@ -1,4 +1,4 @@
-# V 3.9 — Отмена с подтверждением + защита от дублей
+# V 3.9 — Отмена с подтверждением + защита от дублей (ИСПРАВЛЕНО)
 import os
 import json
 import logging
@@ -69,7 +69,7 @@ def get_controllers(sheet_name):
 controllers_startstop = get_controllers(CTRL_STARTSTOP_SHEET)
 controllers_defect = get_controllers(CTRL_DEFECT_SHEET)
 
-# ==================== Последние записи (для показа) ====================
+# ==================== Последние записи ====================
 def get_last_records(ws, n=2):
     try:
         values = ws.get_all_values()
@@ -205,14 +205,12 @@ threading.Thread(target=timeout_worker, daemon=True).start()
 
 # ==================== Поиск последней активной записи ====================
 def find_last_active_record(ws, user_repr):
-    """Возвращает (row, row_number) или (None, None)"""
     try:
         values = ws.get_all_values()
         if len(values) <= 1:
             return None, None
         for i in range(len(values)-1, 0, -1):
             row = values[i]
-            # Столбец Пользователь — 9-й (индекс 8), Статус — 11-й (индекс 10) для Старт-Стоп, 10-й (индекс 9) для Брак
             if len(row) < 9:
                 continue
             user_col = row[8].strip()
@@ -238,7 +236,6 @@ def process(uid, chat, text, user_repr):
         send(chat, "Отменено.", MAIN_KB)
         return
 
-    # === Главное меню ===
     if uid not in states:
         if text in ("/start", "Старт/Стоп"):
             send(chat, "<b>Старт/Стоп</b>\nВыберите действие:", FLOW_MENU_KB)
@@ -295,7 +292,6 @@ def process(uid, chat, text, user_repr):
             row = pend["row"]
             row_num = pend["row_num"]
 
-            # Определяем столбец статуса
             status_col = "K" if flow == "startstop" else "J"
             ws.update(f"{status_col}{row_num}", [["ОТМЕНЕНО"]])
 
@@ -339,7 +335,6 @@ def process(uid, chat, text, user_repr):
         send(chat, "Введите номер линии (1–15):", NUM_LINE_KB)
         return
 
-    # === Все остальные шаги ввода ===
     if "step" not in states[uid]:
         send(chat, "Выберите действие:", FLOW_MENU_KB)
         return
@@ -348,7 +343,6 @@ def process(uid, chat, text, user_repr):
     step = st["step"]
     data = st["data"]
 
-    # ---------- Линия ----------
     if step == "line":
         if not (text.isdigit() and 1 <= int(text) <= 15):
             send(chat, "Номер линии должен быть от 1 до 15:", NUM_LINE_KB)
@@ -360,7 +354,6 @@ def process(uid, chat, text, user_repr):
         send(chat, "Дата:", keyboard([[today, yest], ["Другая дата", "Отмена"]]))
         return
 
-    # ---------- Дата ----------
     if step == "date":
         if text == "Другая дата":
             st["step"] = "date_custom"
@@ -392,7 +385,6 @@ def process(uid, chat, text, user_repr):
             send(chat, "Введите дату в формате дд.мм.гггг", CANCEL_KB)
         return
 
-    # ---------- Время ----------
     if step == "time":
         if text == "Другое время":
             st["step"] = "time_custom"
@@ -429,7 +421,6 @@ def process(uid, chat, text, user_repr):
             send(chat, "Действие:", keyboard([["Запуск", "Остановка"], ["Отмена"]]))
         return
 
-    # ---------- Дальше — всё как раньше ----------
     if step == "action":
         if text not in ("Запуск", "Остановка"):
             send(chat, "Выберите действие:", keyboard([["Запуск", "Остановка"], ["Отмена"]]))
@@ -464,7 +455,7 @@ def process(uid, chat, text, user_repr):
         st["step"] = "znp_prefix"
         curr = now_msk().strftime("%m%y")
         prev = (now_msk() - timedelta(days=35)).strftime("%m%y")
-        kb = [[f"D{curr}", f"L{curr}"], [f"D{prev}]}, f"L{prev}"], ["Другое", "Отмена"]]
+        kb = [[f"D{curr}", f"L{curr}"], [f"D{prev}", f"L{prev}"], ["Другое", "Отмена"]]
         send(chat, "Префикс ЗНП:", keyboard(kb))
         return
 

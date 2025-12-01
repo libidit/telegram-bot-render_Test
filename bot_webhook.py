@@ -147,6 +147,11 @@ MAIN_KB = keyboard([
     ["Старт/Стоп", "Брак"]
 ])
 
+FLOW_MENU_KB = keyboard([
+    ["Новая запись"],
+    ["Назад"]
+])
+
 CANCEL_KB = keyboard([["Отмена"]])
 
 REASONS_CACHE = {"kb": None, "until": 0}

@@ -147,7 +147,7 @@ def append_row(data):
 
 # ==================== Поиск последней записи пользователя в конкретном листе ====================
 def find_last_user_entry(uid, worksheet):
-try:
+    try:
         values = worksheet.get_all_values()
         if len(values) <= 1:
             log.info(f"[{worksheet.title}] Нет строк")

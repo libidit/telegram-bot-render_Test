@@ -565,19 +565,21 @@ def process(uid, chat, text, user_repr):
         states.pop(uid, None)
         return
 
-   if step == "defect_custom":
+    if step == "defect_custom":
         data["defect_type"] = text
         data["user"] = user_repr
         data["flow"] = flow
         append_row(data)
-        send(chat, f"<b>Записано на лист '{'Брак' if flow=='defect' else 'Старт-Стоп'}'!</b>\n"
-                   f"Линия {data['line']} • {data['date']} {data['time']}\n"
-                   f"ЗНП: <code>{data.get('znp','—')}</code>\n"
-                   f"Брака: {data['meters']} м\n"
-                   f"Вид брака: {text}", MAIN_KB)
+        send(chat,
+             f"<b>Записано на лист '{'Брак' if flow=='defect' else 'Старт-Стоп'}'!</b>\n"
+             f"Линия {data['line']} • {data['date']} {data['time']}\n"
+             f"ЗНП: <code>{data.get('znp','—')}</code>\n"
+             f"Брака: {data['meters']} м\n"
+             f"Вид брака: {text}",
+             MAIN_KB)
         states.pop(uid, None)
         return
-
+        
 # ==================== Flask ====================
 app = Flask(__name__)
 LOCK_PATH = "/tmp/bot.lock"

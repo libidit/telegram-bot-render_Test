@@ -30,7 +30,6 @@ creds = service_account.Credentials.from_service_account_info(
 )
 gc = gspread.authorize(creds)
 sh = gc.open_by_key(SPREADSHEET_ID)
-refresh_controllers()
 
 # ==================== Московское время ====================
 MSK = timezone(timedelta(hours=3))
@@ -91,6 +90,7 @@ def refresh_controllers():
         log.info(f"[Контролёры обновлены] Старт/Стоп = {controllers_startstop}, Брак = {controllers_defect}")
     except Exception as e:
         log.exception("Ошибка обновления контролёров: %s", e)
+refresh_controllers()
 
 # ==================== Последние записи ====================
 def get_last_records(ws, n=2):

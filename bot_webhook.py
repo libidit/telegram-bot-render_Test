@@ -279,15 +279,16 @@ def update_user_status(uid, status):
     idx = find_user_row_index(uid)
     if idx:
         try:
-            ws_users.update(f"D{idx}", status)
+            ws_users.update(f"D{idx}", [[status]])
         except Exception as e:
             log.exception("update_user_status error: %s", e)
+
 
 def update_user_role(uid, role):
     idx = find_user_row_index(uid)
     if idx:
         try:
-            ws_users.update(f"C{idx}", role)
+            ws_users.update(f"C{idx}", [[role]])
         except Exception as e:
             log.exception("update_user_role error: %s", e)
 
@@ -501,8 +502,8 @@ def process(uid, chat, text, user_repr):
         idx = find_user_row_index(target_uid)
         if idx:
             try:
-                ws_users.update(f"G{idx}", str(uid))  # "Подтвердил"
-                ws_users.update(f"H{idx}", now_msk().strftime("%Y-%m-%d %H:%M:%S"))
+                ws_users.update(f"G{idx}", [[str(uid)]])
+                ws_users.update(f"H{idx}", [[now_msk().strftime("%Y-%m-%d %H:%M:%S")]])
             except Exception as e:
                 log.exception("setrole: writing confirm data error: %s", e)
 

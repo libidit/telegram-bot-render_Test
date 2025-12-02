@@ -30,6 +30,7 @@ creds = service_account.Credentials.from_service_account_info(
 )
 gc = gspread.authorize(creds)
 sh = gc.open_by_key(SPREADSHEET_ID)
+refresh_controllers()
 
 # ==================== Московское время ====================
 MSK = timezone(timedelta(hours=3))
@@ -75,8 +76,21 @@ def get_controllers(sheet_name):
     except:
         return []
 
-controllers_startstop = get_controllers(CTRL_STARTSTOP_SHEET)
-controllers_defect = get_controllers(CTRL_DEFECT_SHEET)
+controllers_startstop = []
+controllers_defect = []
+
+def refresh_controllers():
+    global controllers_startstop, controllers_defect
+    try:
+        new_startstop = get_controllers(CTRL_STARTSTOP_SHEET)
+        new_defect = get_controllers(CTRL_DEFECT_SHEET)
+
+        controllers_startstop = new_startstop
+        controllers_defect = new_defect
+
+        log.info(f"[Контролёры обновлены] Старт/Стоп = {controllers_startstop}, Брак = {controllers_defect}")
+    except Exception as e:
+        log.exception("Ошибка обновления контролёров: %s", e)
 
 # ==================== Последние записи ====================
 def get_last_records(ws, n=2):
@@ -214,6 +228,17 @@ def timeout_worker():
                 last_activity.pop(uid, None)
 
 threading.Thread(target=timeout_worker, daemon=True).start()
+
+# Интервал обновления (в минутах)
+CONTROLLERS_REFRESH_INTERVAL_MIN = 1440  # 24 часа
+
+def controllers_refresh_worker():
+    while True:
+        refresh_controllers()
+        time.sleep(CONTROLLERS_REFRESH_INTERVAL_MIN * 60)
+
+# Запуск фонового обновления контролёров
+threading.Thread(target=controllers_refresh_worker, daemon=True).start()
 
 # ==================== Поиск последней активной записи ====================
 def find_last_active_record(ws, user_repr):

@@ -420,8 +420,8 @@ def reject_by(approver_uid, target_uid):
         send(approver_uid, f"Пользователь {target_uid} не найден.")
         return
 
-    if not can_approver_confirm(approver["role"], target["role"]):
-        send(approver_uid, "У вас нет прав отклонять этого пользователя.")
+    if approver["role"] == "master" and new_role == "admin":
+        send(chat, "Мастер не может назначать роль admin.")
         return
 
     # Ставим статус "отклонен"

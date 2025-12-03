@@ -404,18 +404,53 @@ def process(uid, chat, text, user_repr):
         return
 
     if "pending_cancel" in state:
-        if text == "Да, отменить":
-            pend = state["pending_cancel"]
-            col = "K" if flow == "startstop" else "J"
-            pend["ws"].update(f"{col}{pend['row_num']}", [["ОТМЕНЕНО"]])
-            send(chat, "Запись отменена!", FLOW_MENU_KB)
-            state["cancel_used"] = True
-            state.pop("pending_cancel", None)
-            return
-        if text == "Нет, оставить":
-            send(chat, "Отмена отменена.", FLOW_MENU_KB)
-            state.pop("pending_cancel", None)
-            return
+            if text == "Да, отменить":
+                pend = state["pending_cancel"]
+                ws = pend["ws"]
+                row = pend["row"]
+                row_num = pend["row_num"]
+                col = "K" if flow == "startstop" else "J"  # колонка "Статус"
+                
+                # Помечаем как ОТМЕНЕНО
+                ws.update(f"{col}{row_num}", [["ОТМЕНЕНО"]])
+                
+                # === Формируем текст уведомления контролёрам ===
+                date_time = f"{row[0]} {row[1]}"
+                line = row[2]
+                user_fio = row[8] if flow == "startstop" else row[7]  # колонка "Пользователь"
+                
+                if flow == "startstop":
+                    action = "Запуск" if row[3] == "запуск" else "Остановка"
+                    reason = row[4] if len(row) > 4 else "—"
+                    msg = (f"ОТМЕНЕНА ЗАПИСЬ СТАРТ/СТОП\n"
+                           f"Линия: {line}\n"
+                           f"{date_time}\n"
+                           f"Действие: {action}\n"
+                           f"Причина: {reason}\n"
+                           f"Отменено: {user_fio}")
+                    notify_controllers(controllers_startstop, msg)
+                else:  # defect
+                    znp = row[4] if len(row) > 4 else "—"
+                    meters = row[5] if len(row) > 5 else "—"
+                    defect_type = row[6] if len(row) > 6 else "—"
+                    msg = (f"ОТМЕНЕНА ЗАПИСЬ БРАКА\n"
+                           f"Линия: {line}\n"
+                           f"{date_time}\n"
+                           f"ЗНП: <code>{znp}</code>\n"
+                           f"Метров брака: {meters}\n"
+                           f"Вид брака: {defect_type}\n"
+                           f"Отменено: {user_fio}")
+                    notify_controllers(controllers_defect, msg)
+                
+                send(chat, "Запись отменена!", FLOW_MENU_KB)
+                state["cancel_used"] = True
+                state.pop("pending_cancel", None)
+                return
+    
+            if text == "Нет, оставить":
+                send(chat, "Отмена отменена.", FLOW_MENU_KB)
+                state.pop("pending_cancel", None)
+                return
 
     # === Новая запись ===
     if text == "Новая запись":

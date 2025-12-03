@@ -292,21 +292,21 @@ def handle_callback(callback):
         if confirmer["role"] == "master" and role == "admin":
             send(chat_id, "Мастер не может назначать админа.")
             return
+
         update_user(target_id, role=role, status="подтвержден", confirmed_by=uid)
-                target = get_user(target_id)
-                send(chat_id, f"Пользователь {target['fio']} подтверждён как <b>{role}</b>")
-        
-                # ←←←←←←←←← НОВАЯ ЛОГИКА — АВТОМАТИЧЕСКОЕ ПРИВЕТСТВИЕ ←←←←←←←←←
-                fio_part = target['fio'].split()[0] if target['fio'] else "пользователь"
-                welcome_text = f"Привет, {fio_part}!\nДоступ подтверждён. Роль: <b>{role}</b>\n\nВыберите действие:"
-                
-                # Очищаем возможное старое состояние
-                if target_id in states:
-                    states.pop(target_id, None)
-                if target_id in last_activity:
-                    last_activity.pop(target_id, None)
-        
-                send(target_id, welcome_text, MAIN_KB)
+        target = get_user(target_id)
+        send(chat_id, f"Пользователь {target['fio']} подтверждён как <b>{role}</b>")
+
+        # Автоматическое приветствие новому пользователю
+        fio_part = target['fio'].split()[0] if target['fio'] else "пользователь"
+        welcome_text = f"Привет, {fio_part}!\nДоступ подтверждён. Роль: <b>{role}</b>\n\nВыберите действие:"
+
+        if target_id in states:
+            states.pop(target_id, None)
+        if target_id in last_activity:
+            last_activity.pop(target_id, None)
+
+        send(int(target_id), welcome_text, MAIN_KB)
 
 # ==================== Поиск последней активной записи ====================
 def find_last_active_record(ws, uid):  # ← теперь принимает чистый uid (int)

@@ -568,8 +568,23 @@ def process(uid, chat, text, user_repr):
         data["time"] = text
         if flow == "defect":
             st["step"] = "znp_prefix"
-            curr = now_msk().strftime("%m%y")
-            prev = (now_msk() - timedelta(days=35)).strftime("%m%y")
+            now = now_msk()
+            curr_month = now.month
+            curr_year = now.year
+            
+            # текущий месяц
+            curr = f"{curr_month:02d}{str(curr_year)[2:]}"
+            
+            # предыдущий месяц
+            if curr_month == 1:
+                prev_month = 12
+                prev_year = curr_year - 1
+            else:
+                prev_month = curr_month - 1
+                prev_year = curr_year
+            
+            prev = f"{prev_month:02d}{str(prev_year)[2:]}"
+
             kb = [[f"D{curr}", f"L{curr}"], [f"D{prev}", f"L{prev}"], ["Другое", "Отмена"]]
             send(chat, "Префикс ЗНП:", keyboard(kb))
         else:
@@ -583,8 +598,23 @@ def process(uid, chat, text, user_repr):
             return
         data["action"] = "запуск" if text == "Запуск" else "остановка"
         if data["action"] == "запуск":
-            st["step"] = "znp_prefix"
-            curr = now_msk().strftime("%m%y")
+            now = now_msk()
+            curr_month = now.month
+            curr_year = now.year
+            
+            # текущий месяц
+            curr = f"{curr_month:02d}{str(curr_year)[2:]}"
+            
+            # предыдущий месяц
+            if curr_month == 1:
+                prev_month = 12
+                prev_year = curr_year - 1
+            else:
+                prev_month = curr_month - 1
+                prev_year = curr_year
+            
+            prev = f"{prev_month:02d}{str(prev_year)[2:]}"
+
             prev = (now_msk() - timedelta(days=35)).strftime("%m%y")
             kb = [[f"D{curr}", f"L{curr}"], [f"D{prev}", f"L{prev}"], ["Другое", "Отмена"]]
             send(chat, "Префикс ЗНП:", keyboard(kb))
@@ -600,15 +630,45 @@ def process(uid, chat, text, user_repr):
             return
         data["reason"] = text
         st["step"] = "znp_prefix"
-        curr = now_msk().strftime("%m%y")
-        prev = (now_msk() - timedelta(days=35)).strftime("%m%y")
+            now = now_msk()
+            curr_month = now.month
+            curr_year = now.year
+            
+            # текущий месяц
+            curr = f"{curr_month:02d}{str(curr_year)[2:]}"
+            
+            # предыдущий месяц
+            if curr_month == 1:
+                prev_month = 12
+                prev_year = curr_year - 1
+            else:
+                prev_month = curr_month - 1
+                prev_year = curr_year
+            
+            prev = f"{prev_month:02d}{str(prev_year)[2:]}"
+
         kb = [[f"D{curr}", f"L{curr}"], [f"D{prev}", f"L{prev}"], ["Другое", "Отмена"]]
         send(chat, "Префикс ЗНП:", keyboard(kb))
         return
 
     if step in ("znp_prefix", "znp_manual"):
-        curr = now_msk().strftime("%m%y")
-        prev = (now_msk() - timedelta(days=35)).strftime("%m%y")
+        now = now_msk()
+        curr_month = now.month
+        curr_year = now.year
+        
+        # текущий месяц
+        curr = f"{curr_month:02d}{str(curr_year)[2:]}"
+        
+        # предыдущий месяц
+        if curr_month == 1:
+            prev_month = 12
+            prev_year = curr_year - 1
+        else:
+            prev_month = curr_month - 1
+            prev_year = curr_year
+        
+        prev = f"{prev_month:02d}{str(prev_year)[2:]}"
+
         valid = [f"D{curr}", f"L{curr}", f"D{prev}", f"L{prev}"]
 
         if step == "znp_prefix":

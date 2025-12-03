@@ -298,15 +298,24 @@ def handle_callback(callback):
         send(target_id, f"Доступ подтверждён!\nРоль: <b>{role}</b>\nТеперь вы можете пользоваться ботом.")
 
 # ==================== Поиск последней активной записи ====================
-def find_last_active_record(ws, user_repr):
-    values = ws.get_all_values()
-    user_col = 7 if ws.title == "Брак" else 8
-    status_col = 9 if ws.title == "Брак" else 10
-    for i in range(len(values)-1, 0, -1):
-        row = values[i]
-        if len(row) <= user_col: continue
-        if row[user_col].strip() == user_repr and (len(row) <= status_col or row[status_col].strip() != "ОТМЕНЕНО"):
-            return row, i+1
+def find_last_active_record(ws, uid):  # ← теперь принимает чистый uid (int)
+    try:
+        values = ws.get_all_values()
+        user_col = 7 if ws.title == "Брак" else 8
+        status_col = 9 if ws.title == "Брак" else 10
+
+        # Ищем с конца
+        for i in range(len(values)-1, 0, -1):
+            row = values[i]
+            if len(row) <= user_col:
+                continue
+            cell_value = row[user_col]
+            # Ищем ID в скобках: "Кирочкин Е.А. (1277384501)" → 1277384501
+            if f"({uid})" in cell_value:
+                if len(row) <= status_col or row[status_col].strip() != "ОТМЕНЕНО":
+                    return row, i+1
+    except Exception as e:
+        log.exception("find_last_active_record error")
     return None, None
 
 # ==================== Основная логика ====================
@@ -369,7 +378,7 @@ def process(uid, chat, text, user_repr):
             send(chat, "Вы уже отменили одну запись. Сначала сделайте новую.", FLOW_MENU_KB)
             return
         ws = ws_defect if flow == "defect" else ws_startstop
-        row, row_num = find_last_active_record(ws, user_repr)
+        row, row_num = find_last_active_record(ws, uid)  # ← передаём только ID
         if not row:
             send(chat, "Нет активных записей для отмены.", FLOW_MENU_KB)
             return

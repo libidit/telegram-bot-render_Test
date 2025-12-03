@@ -673,7 +673,7 @@ def process(uid, chat, text, user_repr):
     
         # (остальные шаги — полностью как у тебя, не трогаю)
     
-        send(chat, "Выберите действие:", FLOW_MENU_KB)
+    send(chat, "Выберите действие:", FLOW_MENU_KB)
 
 # ==================== Flask ====================
 app = Flask(__name__)

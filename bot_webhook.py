@@ -1,4 +1,4 @@
-# V 3.9 — Отмена с подтверждением + защита от дублей + ПОЛНАЯ АВТОРИЗАЦИЯ ПОЛЬЗОВАТЕЛЕЙ
+# V 3.9 — Полная авторизация + Отмена + ZNP с корректным предыдущим месяцем
 import os
 import json
 import logging
@@ -41,7 +41,7 @@ STARTSTOP_SHEET = "Старт-Стоп"
 DEFECT_SHEET = "Брак"
 CTRL_STARTSTOP_SHEET = "Контр_Старт-Стоп"
 CTRL_DEFECT_SHEET = "Контр_Брак"
-USERS_SHEET = "Пользователи"  # ← Новый лист для пользователей
+USERS_SHEET = "Пользователи"
 
 HEADERS_STARTSTOP = ["Дата","Время","Номер линии","Действие","Причина","ЗНП","Метров брака","Вид брака","Пользователь","Время отправки","Статус"]
 USERS_HEADERS = ["TelegramID", "ФИО", "Роль", "Статус", "Запросил у", "Дата создания", "Подтвердил", "Дата подтверждения"]
@@ -58,7 +58,7 @@ def get_ws(sheet_name, headers=None):
 
 ws_startstop = get_ws(STARTSTOP_SHEET, HEADERS_STARTSTOP)
 ws_defect = get_ws(DEFECT_SHEET)
-ws_users = get_ws(USERS_SHEET, USERS_HEADERS)  # ← Создаём/получаем лист пользователей
+ws_users = get_ws(USERS_SHEET, USERS_HEADERS)
 
 # ==================== Контролёры ====================
 def get_controllers(sheet_name):
@@ -77,15 +77,13 @@ def refresh_controllers():
     controllers_startstop = get_controllers(CTRL_STARTSTOP_SHEET)
     controllers_defect = get_controllers(CTRL_DEFECT_SHEET)
 
-# Обновление контролёров раз в сутки
 threading.Thread(target=lambda: [time.sleep(86400), refresh_controllers()], daemon=True).start()
 
 # ==================== Последние записи ====================
 def get_last_records(ws, n=2):
     try:
         values = ws.get_all_values()
-        if len(values) <= 1:
-            return []
+        if len(values) <= 1: return []
         return values[-n:]
     except:
         return []
@@ -136,11 +134,7 @@ def append_row(data):
 
 # ==================== Клавиатуры ====================
 def keyboard(rows):
-    return {
-        "keyboard": [[{"text": t} for t in row] for row in rows],
-        "resize_keyboard": True,
-        "one_time_keyboard": False
-    }
+    return {"keyboard": [[{"text": t} for t in row] for row in rows], "resize_keyboard": True, "one_time_keyboard": False}
 
 MAIN_KB = keyboard([["Старт/Стоп", "Брак"]])
 FLOW_MENU_KB = keyboard([["Новая запись"], ["Отменить последнюю запись"], ["Назад"]])
@@ -148,15 +142,8 @@ CANCEL_KB = keyboard([["Отмена"]])
 CONFIRM_KB = keyboard([["Да, отменить"], ["Нет, оставить"]])
 
 NUM_LINE_KB = {
-    "keyboard": [
-        [{"text": "1"}, {"text": "2"}, {"text": "3"}, {"text": "4"}, {"text": "5"}],
-        [{"text": "6"}, {"text": "7"}, {"text": "8"}, {"text": "9"}, {"text": "10"}],
-        [{"text": "11"}, {"text": "12"}, {"text": "13"}, {"text": "14"}, {"text": "15"}],
-        [{"text": "Отмена"}]
-    ],
-    "resize_keyboard": True,
-    "one_time_keyboard": True,
-    "input_field_placeholder": "Выберите номер линии"
+    "keyboard": [[{"text": str(i)} for i in range(1,6)], [{"text": str(i)} for i in range(6,11)], [{"text": str(i)} for i in range(11,16)], [{"text": "Отмена"}]],
+    "resize_keyboard": True, "one_time_keyboard": True, "input_field_placeholder": "Выберите номер линии"
 }
 
 REASONS_CACHE = {"kb": None, "until": 0}
@@ -214,7 +201,7 @@ def timeout_worker():
 
 threading.Thread(target=timeout_worker, daemon=True).start()
 
-# ==================== АВТОРИЗАЦИЯ ПОЛЬЗОВАТЕЛЕЙ ====================
+# ==================== АВТОРИЗАЦИЯ ====================
 def get_user(uid):
     try:
         values = ws_users.get_all_values()
@@ -224,17 +211,13 @@ def get_user(uid):
                 role = row[2].strip() if len(row) > 2 else "operator"
                 status = row[3].strip() if len(row) > 3 else "ожидает"
                 return {"id": str(uid), "fio": fio.strip(), "role": role, "status": status}
-    except Exception as e:
-        log.exception("get_user error: %s", e)
+    except: pass
     return None
 
 def add_user(uid, fio):
     try:
-        ws_users.append_row([
-            str(uid), fio.strip(), "operator", "ожидает", "", now_msk().strftime("%Y-%m-%d %H:%M:%S"), "", ""
-        ], value_input_option="USER_ENTERED")
-    except Exception as e:
-        log.exception("add_user error: %s", e)
+        ws_users.append_row([str(uid), fio.strip(), "operator", "ожидает", "", now_msk().strftime("%Y-%m-%d %H:%M:%S"), "", ""], value_input_option="USER_ENTERED")
+    except: pass
 
 def find_user_row_index(uid):
     try:
@@ -242,21 +225,19 @@ def find_user_row_index(uid):
         for idx, row in enumerate(values[1:], start=2):
             if row and row[0] == str(uid):
                 return idx
-    except:
-        return None
+    except: pass
+    return None
 
 def update_user(uid, role=None, status=None, confirmed_by=None):
     idx = find_user_row_index(uid)
-    if not idx:
-        return
+    if not idx: return
     try:
         if role: ws_users.update(f"C{idx}", [[role]])
         if status: ws_users.update(f"D{idx}", [[status]])
         if confirmed_by:
             ws_users.update(f"G{idx}", [[str(confirmed_by)]])
             ws_users.update(f"H{idx}", [[now_msk().strftime("%Y-%m-%d %H:%M:%S")]])
-    except Exception as e:
-        log.exception("update_user error: %s", e)
+    except: pass
 
 def get_approvers():
     res = []
@@ -266,45 +247,21 @@ def get_approvers():
             if len(row) >= 4 and row[2].strip() in ("admin", "master") and row[3].strip() == "подтвержден":
                 if row[0].strip().isdigit():
                     res.append(int(row[0].strip()))
-    except:
-        pass
+    except: pass
     return res
 
 def notify_approvers_new_user(uid, fio):
     approvers = get_approvers()
-    if not approvers:
-        return
-    kb = {
-        "inline_keyboard": [[
-            {"text": "Подтвердить", "callback_data": f"approve_{uid}"},
-            {"text": "Отклонить", "callback_data": f"reject_{uid}"}
-        ]]
-    }
+    if not approvers: return
+    kb = {"inline_keyboard": [[{"text": "Подтвердить", "callback_data": f"approve_{uid}"}, {"text": "Отклонить", "callback_data": f"reject_{uid}"}]]}
     text = f"<b>Новая заявка на доступ</b>\nФИО: {fio}\nID: <code>{uid}</code>"
     for a in approvers:
         try:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={"chat_id": a, "text": text, "parse_mode": "HTML", "reply_markup": json.dumps(kb)}
-            )
-        except:
-            pass
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                          json={"chat_id": a, "text": text, "parse_mode": "HTML", "reply_markup": json.dumps(kb)})
+        except: pass
 
-# ==================== Поиск последней активной записи ====================
-def find_last_active_record(ws, user_repr):
-    values = ws.get_all_values()
-    user_col = 7 if ws.title == "Брак" else 8
-    status_col = 9 if ws.title == "Брак" else 10
-
-    for i in range(len(values)-1, 0, -1):
-        row = values[i]
-        if len(row) <= user_col:
-            continue
-        if row[user_col].strip() == user_repr and (len(row) <= status_col or row[status_col].strip() != "ОТМЕНЕНО"):
-            return row, i+1
-    return None, None
-
-# ==================== Обработка callback от инлайн-кнопок ====================
+# ==================== Callback от инлайн-кнопок ====================
 def handle_callback(callback):
     data = callback["data"]
     uid = callback["from"]["id"]
@@ -315,18 +272,13 @@ def handle_callback(callback):
         user = get_user(uid)
         if not user or user["role"] not in ("admin", "master") or user["status"] != "подтвержден":
             return
-
         target = get_user(target_id)
-        if not target:
-            return
+        if not target: return
 
         if data.startswith("approve_"):
-            roles = ["operator", "master"]
-            if user["role"] == "admin":
-                roles.append("admin")
+            roles = ["operator", "master"] + (["admin"] if user["role"] == "admin" else [])
             kb = {"inline_keyboard": [[{"text": r, "callback_data": f"setrole_{target_id}_{r}"}] for r in roles]}
-            text = f"Выберите роль для <b>{target['fio']}</b>:"
-            send(chat_id, text, kb)
+            send(chat_id, f"Выберите роль для <b>{target['fio']}</b>:", kb)
         elif data.startswith("reject_"):
             update_user(target_id, status="отклонен", confirmed_by=uid)
             send(chat_id, f"Заявка отклонена: {target['fio']}")
@@ -336,8 +288,6 @@ def handle_callback(callback):
         parts = data.split("_")
         target_id = int(parts[1])
         role = parts[2]
-        if role not in ("operator  master", "admin"):
-            return
         confirmer = get_user(uid)
         if confirmer["role"] == "master" and role == "admin":
             send(chat_id, "Мастер не может назначать админа.")
@@ -347,17 +297,27 @@ def handle_callback(callback):
         send(chat_id, f"Пользователь {target['fio']} подтверждён как <b>{role}</b>")
         send(target_id, f"Доступ подтверждён!\nРоль: <b>{role}</b>\nТеперь вы можете пользоваться ботом.")
 
+# ==================== Поиск последней активной записи ====================
+def find_last_active_record(ws, user_repr):
+    values = ws.get_all_values()
+    user_col = 7 if ws.title == "Брак" else 8
+    status_col = 9 if ws.title == "Брак" else 10
+    for i in range(len(values)-1, 0, -1):
+        row = values[i]
+        if len(row) <= user_col: continue
+        if row[user_col].strip() == user_repr and (len(row) <= status_col or row[status_col].strip() != "ОТМЕНЕНО"):
+            return row, i+1
+    return None, None
+
 # ==================== Основная логика ====================
 def process(uid, chat, text, user_repr):
     last_activity[uid] = time.time()
-
     if uid not in states:
         states[uid] = {"chat": chat, "cancel_used": False}
-
     state = states[uid]
     user = get_user(uid)
 
-    # === Первый вход — регистрация ===
+    # === Регистрация ===
     if user is None:
         if state.get("waiting_fio"):
             fio = text.strip()
@@ -366,24 +326,22 @@ def process(uid, chat, text, user_repr):
                 return
             add_user(uid, fio)
             notify_approvers_new_user(uid, fio)
-            send(chat, "Спасибо! Ваша заявка отправлена на подтверждение администратору.\nОжидайте...")
+            send(chat, "Спасибо! Заявка отправлена на подтверждение администратору.\nОжидайте...")
             states.pop(uid, None)
             return
         state["waiting_fio"] = True
-        send(chat, "Привет! Это бот учёта простоев и брака.\n\nДля начала введите ваше <b>ФИО</b>:")
+        send(chat, "Привет! Это бот учёта простоев и брака.\n\nВведите ваше <b>ФИО</b> для регистрации:")
         return
 
-    # === Ожидает подтверждения ===
     if user["status"] != "подтвержден":
-        send(chat, "Ваша заявка ожидает подтверждения администратором.\nКак только вас подтвердят — вы сможете работать.")
+        send(chat, "Ваша заявка ожидает подтверждения администратором.")
         return
 
-    # === ПОЛЬЗОВАТЕЛЬ ПОДТВЕРЖДЁН — РАБОТАЕМ ===
+    # === Основное меню ===
     if text == "Назад":
         states.pop(uid, None)
         send(chat, "Главное меню:", MAIN_KB)
         return
-
     if text == "Отмена":
         states.pop(uid, None)
         last_activity.pop(uid, None)
@@ -393,11 +351,11 @@ def process(uid, chat, text, user_repr):
     if "flow" not in state:
         if text in ("/start", "Старт/Стоп"):
             send(chat, "<b>Старт/Стоп</b>\nВыберите действие:", FLOW_MENU_KB)
-            state.update({"flow": "startstop"})
+            state["flow"] = "startstop"
             return
         elif text == "Брак":
             send(chat, "<b>Брак</b>\nВыберите действие:", FLOW_MENU_KB)
-            state.update({"flow": "defect"})
+            state["flow"] = "defect"
             return
         else:
             send(chat, f"Привет, {user['fio'].split()[0]}!\nВыберите действие:", MAIN_KB)
@@ -413,12 +371,12 @@ def process(uid, chat, text, user_repr):
         ws = ws_defect if flow == "defect" else ws_startstop
         row, row_num = find_last_active_record(ws, user_repr)
         if not row:
-            send(chat, "У вас нет активных записей для отмены.", FLOW_MENU_KB)
+            send(chat, "Нет активных записей для отмены.", FLOW_MENU_KB)
             return
         state["pending_cancel"] = {"ws": ws, "row": row, "row_num": row_num}
-        action = "Запуск" if flow == "startstop" and row[3] == "запуск" else "Остановка" if flow == "startstop" else ""
         msg = f"Отменить запись?\n\n"
         if flow == "startstop":
+            action = "Запуск" if row[3] == "запуск" else "Остановка"
             msg += f"<b>Старт/Стоп</b>\n{row[0]} {row[1]} | Линия {row[2]}\nДействие: {action}\nПричина: {row[4] if len(row)>4 else '—'}"
         else:
             msg += f"<b>Брак</b>\n{row[0]} {row[1]} | Линия {row[2]}\nЗНП: <code>{row[4]}</code>\nМетров: {row[5]}\nВид: {row[6] if len(row)>6 else '—'}"
@@ -428,9 +386,9 @@ def process(uid, chat, text, user_repr):
     if "pending_cancel" in state:
         if text == "Да, отменить":
             pend = state["pending_cancel"]
-            status_col = "K" if flow == "startstop" else "J"
-            pend["ws"].update(f"{status_col}{pend['row_num']}", [["ОТМЕНЕНО"]])
-            send(chat, "Запись успешно отменена!", FLOW_MENU_KB)
+            col = "K" if flow == "startstop" else "J"
+            pend["ws"].update(f"{col}{pend['row_num']}", [["ОТМЕНЕНО"]])
+            send(chat, "Запись отменена!", FLOW_MENU_KB)
             state["cancel_used"] = True
             state.pop("pending_cancel", None)
             return
@@ -439,7 +397,7 @@ def process(uid, chat, text, user_repr):
             state.pop("pending_cancel", None)
             return
 
-    # === Новая запись и вся остальная логика (полностью сохранена из твоей версии) ===
+    # === Новая запись ===
     if text == "Новая запись":
         state["cancel_used"] = False
         if flow == "defect":
@@ -458,10 +416,20 @@ def process(uid, chat, text, user_repr):
             state.update({"step": "line", "data": {}})
         send(chat, "Введите номер линии (1–15):", NUM_LINE_KB)
         return
-    # --- Step: line ---
+
+    # === Все шаги формы ===
+    step = state.get("step")
+    if not step:
+        send(chat, "Выберите действие:", FLOW_MENU_KB)
+        return
+
+    data = state.get("data", {})
+    st = state
+
+    # line
     if step == "line":
-        if not (text.isdigit() and 1 <= int(text) <= 15):
-            send(chat, "Номер линии должен быть от 1 до 15:", NUM_LINE_KB)
+        if not text.isdigit() or not (1 <= int(text) <= 15):
+            send(chat, "Номер линии от 1 до 15:", NUM_LINE_KB)
             return
         data["line"] = text
         st["step"] = "date"
@@ -470,7 +438,7 @@ def process(uid, chat, text, user_repr):
         send(chat, "Дата:", keyboard([[today, yest], ["Другая дата", "Отмена"]]))
         return
 
-    # --- Step: date ---
+    # date
     if step == "date":
         if text == "Другая дата":
             st["step"] = "date_custom"
@@ -483,9 +451,9 @@ def process(uid, chat, text, user_repr):
             send(chat, "Неверный формат даты.", CANCEL_KB)
             return
         st["step"] = "time"
-        now = now_msk()
-        t = [now.strftime("%H:%M"), (now-timedelta(minutes=10)).strftime("%H:%M"),
-             (now-timedelta(minutes=20)).strftime("%H:%M"), (now-timedelta(minutes=30)).strftime("%H:%M")]
+        now_t = now_msk()
+        t = [now_t.strftime("%H:%M"), (now_t-timedelta(minutes=10)).strftime("%H:%M"),
+             (now_t-timedelta(minutes=20)).strftime("%H:%M"), (now_t-timedelta(minutes=30)).strftime("%H:%M")]
         send(chat, "Время:", keyboard([[t[0], t[1], "Другое время"], [t[2], t[3], "Отмена"]]))
         return
 
@@ -494,15 +462,15 @@ def process(uid, chat, text, user_repr):
             datetime.strptime(text, "%d.%m.%Y")
             data["date"] = text
             st["step"] = "time"
-            now = now_msk()
-            t = [now.strftime("%H:%M"), (now-timedelta(minutes=10)).strftime("%H:%M"),
-                 (now-timedelta(minutes=20)).strftime("%H:%M"), (now-timedelta(minutes=30)).strftime("%H:%M")]
+            now_t = now_msk()
+            t = [now_t.strftime("%H:%M"), (now_t-timedelta(minutes=10)).strftime("%H:%M"),
+                 (now_t-timedelta(minutes=20)).strftime("%H:%M"), (now_t-timedelta(minutes=30)).strftime("%H:%M")]
             send(chat, "Время:", keyboard([[t[0], t[1], "Другое время"], [t[2], t[3], "Отмена"]]))
         except:
-            send(chat, "Введите дату в формате дд.мм.гггг", CANCEL_KB)
+            send(chat, "Формат: дд.мм.гггг", CANCEL_KB)
         return
 
-    # --- Step: time ---
+    # time
     if step in ("time", "time_custom"):
         if text == "Другое время":
             st["step"] = "time_custom"
@@ -512,25 +480,21 @@ def process(uid, chat, text, user_repr):
             send(chat, "Неверный формат времени.", CANCEL_KB)
             return
         data["time"] = text
+
+        now = now_msk()
+        curr_month = now.month
+        curr_year = now.year
+        curr = f"{curr_month:02d}{str(curr_year)[2:]}"
+        if curr_month == 1:
+            prev_month = 12
+            prev_year = curr_year - 1
+        else:
+            prev_month = curr_month - 1
+            prev_year = curr_year
+        prev = f"{prev_month:02d}{str(prev_year)[2:]}"
+
         if flow == "defect":
             st["step"] = "znp_prefix"
-            now = now_msk()
-            curr_month = now.month
-            curr_year = now.year
-            
-            # текущий месяц
-            curr = f"{curr_month:02d}{str(curr_year)[2:]}"
-            
-            # предыдущий месяц
-            if curr_month == 1:
-                prev_month = 12
-                prev_year = curr_year - 1
-            else:
-                prev_month = curr_month - 1
-                prev_year = curr_year
-            
-            prev = f"{prev_month:02d}{str(prev_year)[2:]}"
-
             kb = [[f"D{curr}", f"L{curr}"], [f"D{prev}", f"L{prev}"], ["Другое", "Отмена"]]
             send(chat, "Префикс ЗНП:", keyboard(kb))
         else:
@@ -538,31 +502,25 @@ def process(uid, chat, text, user_repr):
             send(chat, "Действие:", keyboard([["Запуск", "Остановка"], ["Отмена"]]))
         return
 
-    # --- Step: action ---
+    # action
     if step == "action":
         if text not in ("Запуск", "Остановка"):
             send(chat, "Выберите действие:", keyboard([["Запуск", "Остановка"], ["Отмена"]]))
             return
         data["action"] = "запуск" if text == "Запуск" else "остановка"
+        now = now_msk()
+        curr_month = now.month
+        curr_year = now.year
+        curr = f"{curr_month:02d}{str(curr_year)[2:]}"
+        if curr_month == 1:
+            prev_month = 12
+            prev_year = curr_year - 1
+        else:
+            prev_month = curr_month - 1
+            prev_year = curr_year
+        prev = f"{prev_month:02d}{str(prev_year)[2:]}"
         if data["action"] == "запуск":
             st["step"] = "znp_prefix"
-            now = now_msk()
-            curr_month = now.month
-            curr_year = now.year
-            
-            # текущий месяц
-            curr = f"{curr_month:02d}{str(curr_year)[2:]}"
-            
-            # предыдущий месяц
-            if curr_month == 1:
-                prev_month = 12
-                prev_year = curr_year - 1
-            else:
-                prev_month = curr_month - 1
-                prev_year = curr_year
-            
-            prev = f"{prev_month:02d}{str(prev_year)[2:]}"
-
             kb = [[f"D{curr}", f"L{curr}"], [f"D{prev}", f"L{prev}"], ["Другое", "Отмена"]]
             send(chat, "Префикс ЗНП:", keyboard(kb))
         else:
@@ -570,54 +528,42 @@ def process(uid, chat, text, user_repr):
             send(chat, "Причина остановки:", get_reasons_kb())
         return
 
-    # --- Step: reason ---
+    # reason
     if step in ("reason", "reason_custom"):
         if text == "Другое" and step == "reason":
             st["step"] = "reason_custom"
             send(chat, "Введите причину остановки:", CANCEL_KB)
             return
         data["reason"] = text
-        st["step"] = "znp_prefix"
         now = now_msk()
         curr_month = now.month
         curr_year = now.year
-        
-        # текущий месяц
         curr = f"{curr_month:02d}{str(curr_year)[2:]}"
-        
-        # предыдущий месяц
         if curr_month == 1:
             prev_month = 12
             prev_year = curr_year - 1
         else:
             prev_month = curr_month - 1
             prev_year = curr_year
-        
         prev = f"{prev_month:02d}{str(prev_year)[2:]}"
-
+        st["step"] = "znp_prefix"
         kb = [[f"D{curr}", f"L{curr}"], [f"D{prev}", f"L{prev}"], ["Другое", "Отмена"]]
         send(chat, "Префикс ЗНП:", keyboard(kb))
         return
 
-    # --- Step: znp_prefix / znp_manual ---
+    # znp_prefix / znp_manual
     if step in ("znp_prefix", "znp_manual"):
         now = now_msk()
         curr_month = now.month
         curr_year = now.year
-        
-        # текущий месяц
         curr = f"{curr_month:02d}{str(curr_year)[2:]}"
-        
-        # предыдущий месяц
         if curr_month == 1:
             prev_month = 12
             prev_year = curr_year - 1
         else:
             prev_month = curr_month - 1
             prev_year = curr_year
-        
         prev = f"{prev_month:02d}{str(prev_year)[2:]}"
-
         valid = [f"D{curr}", f"L{curr}", f"D{prev}", f"L{prev}"]
 
         if step == "znp_prefix":
@@ -627,7 +573,7 @@ def process(uid, chat, text, user_repr):
                 return
             if text == "Другое":
                 st["step"] = "znp_manual"
-                send(chat, "Введите полный ЗНП (например, D1225-1234):", CANCEL_KB)
+                send(chat, "Введите полный ЗНП (D1225-1234):", CANCEL_KB)
                 return
             if text.isdigit() and len(text) == 4 and "znp_prefix" in data:
                 data["znp"] = f"{data['znp_prefix']}-{text}"
@@ -646,7 +592,7 @@ def process(uid, chat, text, user_repr):
             send(chat, "Неправильный формат ЗНП.\nПример: <code>D1225-1234</code>", CANCEL_KB)
             return
 
-    # --- Step: meters ---
+    # meters
     if step == "meters":
         if not text.isdigit() or int(text) <= 0:
             send(chat, "Укажите количество метров брака (число > 0):", CANCEL_KB)
@@ -656,22 +602,20 @@ def process(uid, chat, text, user_repr):
         send(chat, "Вид брака:", get_defect_kb())
         return
 
-    # --- Step: defect_type / defect_custom ---
-    if state.get("step") in ("defect_type", "defect_custom"):
-            if text == "Другое" and state["step"] == "defect_type":
-                state["step"] = "defect_custom"
-                send(chat, "Опишите вид брака:", CANCEL_KB)
-                return
-            data = state["data"]
-            data["defect_type"] = "" if text == "Без брака" else text
-            data["user"] = f"{user['fio']} ({uid})"
-            data["flow"] = flow
-            append_row(data)
-            send(chat, f"<b>Записано!</b>\nЛиния {data['line']} • {data['date']} {data['time']}", MAIN_KB)
-            states.pop(uid, None)
+    # defect_type
+    if step in ("defect_type", "defect_custom"):
+        if text == "Другое" and step == "defect_type":
+            st["step"] = "defect_custom"
+            send(chat, "Опишите вид брака:", CANCEL_KB)
             return
-    
-    # (остальные шаги — полностью как у тебя, не трогаю)
+        data["defect_type"] = "" if text == "Без брака" else text
+        data["user"] = f"{user['fio']} ({uid})"
+        data["flow"] = flow
+        append_row(data)
+        send(chat, f"<b>Записано!</b>\nЛиния {data['line']} • {data['date']} {data['time']}", MAIN_KB)
+        states.pop(uid, None)
+        return
+
     send(chat, "Выберите действие:", FLOW_MENU_KB)
 
 # ==================== Flask ====================
@@ -689,18 +633,15 @@ if os.getenv("RENDER"):
 @app.route("/", methods=["POST"])
 def webhook():
     update = request.get_json()
-    if not update:
-        return "ok", 200
+    if not update: return "ok", 200
 
     if "callback_query" in update:
         handle_callback(update["callback_query"])
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery", json={
-            "callback_query_id": update["callback_query"]["id"]
-        })
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+                      json={"callback_query_id": update["callback_query"]["id"]})
         return "ok", 200
 
-    if "message" not in update:
-        return "ok", 200
+    if "message" not in update: return "ok", 200
 
     m = update["message"]
     chat_id = m["chat"]["id"]

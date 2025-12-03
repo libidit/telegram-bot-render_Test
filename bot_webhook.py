@@ -657,20 +657,23 @@ def process(uid, chat, text, user_repr):
         return
 
     # --- Step: defect_type / defect_custom ---
-    if step in ("defect_type", "defect_custom"):
-        if text == "Другое" and step == "defect_type":
-            st["step"] = "defect_custom"
-            send(chat, "Опишите вид брака:", CANCEL_KB)
+    if state.get("step") in ("defect_type", "defect_custom"):
+            if text == "Другое" and state["step"] == "defect_type":
+                state["step"] = "defect_custom"
+                send(chat, "Опишите вид брака:", CANCEL_KB)
+                return
+            data = state["data"]
+            data["defect_type"] = "" if text == "Без брака" else text
+            data["user"] = f"{user['fio']} ({uid})"
+            data["flow"] = flow
+            append_row(data)
+            send(chat, f"<b>Записано!</b>\nЛиния {data['line']} • {data['date']} {data['time']}", MAIN_KB)
+            states.pop(uid, None)
             return
-        data["defect_type"] = "" if text == "Без брака" else text
-        data["user"] = user_repr
-        data["flow"] = flow
-        append_row(data)
-        send(chat, f"<b>Записано!</b>\nЛиния {data['line']} • {data['date']} {data['time']}", MAIN_KB)
-        states.pop(uid, None)
-        return
-        
-send(chat, "Выберите действие:", FLOW_MENU_KB)
+    
+        # (остальные шаги — полностью как у тебя, не трогаю)
+    
+        send(chat, "Выберите действие:", FLOW_MENU_KB)
 
 # ==================== Flask ====================
 app = Flask(__name__)

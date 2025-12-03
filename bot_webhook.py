@@ -689,20 +689,36 @@ def process(uid, chat, text, user_repr):
                     f"Добавил: {user['fio']}"
                 )
             else:  # startstop
-                action_ru = "Запуск" if data["action"] == "запуск" else "Остановка"
-                reason = data.get("reason", "—")
-                znp = data.get("znp", "—")
-    
-                confirm_text = (
-                    f"Запись Старт/Стоп сохранена\n\n"
-                    f"Линия: <b>{line}</b>\n"
-                    f"Дата и время: <b>{date_time}</b>\n"
-                    f"Действие: <b>{action_ru}</b>\n"
-                    f"Причина: <b>{reason}</b>\n"
-                )
-                if znp != "—":
-                    confirm_text += f"ЗНП: <code>{znp}</code>\n"
-                confirm_text += f"\nДобавил: {user['fio']}"
+                        action_ru = "Запуск" if data["action"] == "запуск" else "Остановка"
+                        reason = data.get("reason", "—")
+                        znp = data.get("znp", "—")
+                        meters = data.get("meters", "")
+                        defect_type = data.get("defect_type", "")
+            
+                        confirm_text = (
+                            f"Запись Старт/Стоп сохранена\n\n"
+                            f"Линия: <b>{line}</b>\n"
+                            f"Дата и время: <b>{date_time}</b>\n"
+                            f"Действие: <b>{action_ru}</b>\n"
+                            f"Причина: <b>{reason}</b>\n"
+                        )
+            
+                        # Добавляем ЗНП, если есть
+                        if znp != "—":
+                            confirm_text += f"ЗНП: <code>{znp}</code>\n"
+            
+                        # Добавляем метры брака, если указаны
+                        if meters:
+                            confirm_text += f"Метров брака: <b>{meters}</b>\n"
+            
+                        # Добавляем вид брака, если указан
+                        if defect_type:
+                            if defect_type == "":  # это значит "Без брака" в старт/стопе
+                                confirm_text += f"Вид брака: <b>Без брака</b>\n"
+                            else:
+                                confirm_text += f"Вид брака: <b>{defect_type}</b>\n"
+            
+                        confirm_text += f"\nДобавил: {user['fio']}"
     
             send(chat, confirm_text, MAIN_KB)
             states.pop(uid, None)

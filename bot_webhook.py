@@ -615,7 +615,6 @@ def process(uid, chat, text, user_repr):
             
             prev = f"{prev_month:02d}{str(prev_year)[2:]}"
             
-            prev = (now_msk() - timedelta(days=35)).strftime("%m%y")
             kb = [[f"D{curr}", f"L{curr}"], [f"D{prev}", f"L{prev}"], ["Другое", "Отмена"]]
             send(chat, "Префикс ЗНП:", keyboard(kb))
         else:

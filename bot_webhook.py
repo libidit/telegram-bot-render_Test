@@ -659,17 +659,55 @@ def process(uid, chat, text, user_repr):
 
     # defect_type
     if step in ("defect_type", "defect_custom"):
-        if text == "Другое" and step == "defect_type":
-            st["step"] = "defect_custom"
-            send(chat, "Опишите вид брака:", CANCEL_KB)
+            if text == "Другое" and step == "defect_type":
+                st["step"] = "defect_custom"
+                send(chat, "Опишите вид брака:", CANCEL_KB)
+                return
+            data["defect_type"] = "" if text == "Без брака" else text
+    
+            # === Финальная запись + красивое подтверждение + уведомление контролёрам ===
+            data["user"] = f"{user['fio']} ({uid})"
+            data["flow"] = flow
+            append_row(data)  # ← здесь уже отправляется уведомление о новой записи
+    
+            # Красивое сообщение-подтверждение пользователю
+            date_time = f"{data['date']} {data['time']}"
+            line = data["line"]
+    
+            if flow == "defect":
+                znp = data.get("znp", "—")
+                meters = data.get("meters", "—")
+                defect_type = "Без брака" if data["defect_type"] == "" else data["defect_type"]
+    
+                confirm_text = (
+                    f"Запись брака сохранена\n\n"
+                    f"Линия: <b>{line}</b>\n"
+                    f"Дата и время: <b>{date_time}</b>\n"
+                    f"ЗНП: <code>{znp}</code>\n"
+                    f"Метров брака: <b>{meters}</b>\n"
+                    f"Вид брака: <b>{defect_type}</b>\n\n"
+                    f"Добавил: {user['fio']}"
+                )
+            else:  # startstop
+                action_ru = "Запуск" if data["action"] == "запуск" else "Остановка"
+                reason = data.get("reason", "—")
+                znp = data.get("znp", "—")
+    
+                confirm_text = (
+                    f"Запись Старт/Стоп сохранена\n\n"
+                    f"Линия: <b>{line}</b>\n"
+                    f"Дата и время: <b>{date_time}</b>\n"
+                    f"Действие: <b>{action_ru}</b>\n"
+                    f"Причина: <b>{reason}</b>\n"
+                )
+                if znp != "—":
+                    confirm_text += f"ЗНП: <code>{znp}</code>\n"
+                confirm_text += f"\nДобавил: {user['fio']}"
+    
+            send(chat, confirm_text, MAIN_KB)
+            states.pop(uid, None)
+            last_activity.pop(uid, None)
             return
-        data["defect_type"] = "" if text == "Без брака" else text
-        data["user"] = f"{user['fio']} ({uid})"
-        data["flow"] = flow
-        append_row(data)
-        send(chat, f"<b>Записано!</b>\nЛиния {data['line']} • {data['date']} {data['time']}", MAIN_KB)
-        states.pop(uid, None)
-        return
 
     send(chat, "Выберите действие:", FLOW_MENU_KB)
 

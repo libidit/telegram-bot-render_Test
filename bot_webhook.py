@@ -753,7 +753,7 @@ class FSM:
                     data["znp_prefix"] = text
                     # now ask for last 4 digits — show numeric keyboard
                     st["step"] = "znp_last4"
-                    tg_send(chat, f"Последние 4 цифры ЗНП для <b>{text}</b>-XXXX:", NUMERIC_KB)
+                    tg_send(chat, f"Последние 4 цифры ЗНП для <b>{text}</b>-XXXX:", NUMERIC_INPUT_KB)
                     return
                 if text == "Другое":
                     st["step"] = "znp_manual"

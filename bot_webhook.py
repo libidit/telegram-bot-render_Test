@@ -269,17 +269,14 @@ NUM_LINE_KB = {
     "input_field_placeholder": "Выберите номер линии"
 }
 
-# Numeric keypad (for last 4 ZNP digits and meters)
-NUMERIC_KB = {
+# Numeric input keyboard (opens numeric keypad on phone; user types digits manually)
+NUMERIC_INPUT_KB = {
     "keyboard": [
-        [{"text": "1"}, {"text": "2"}, {"text": "3"}],
-        [{"text": "4"}, {"text": "5"}, {"text": "6"}],
-        [{"text": "7"}, {"text": "8"}, {"text": "9"}],
-        [{"text": "0"}, {"text": "Отмена"}]
+        [{"text": "Отмена"}]
     ],
     "resize_keyboard": True,
     "one_time_keyboard": False,
-    "input_field_placeholder": "Введите числа"
+    "input_field_placeholder": "Введите число"
 }
 
 # reason/defect kb builders (with caching)
@@ -778,20 +775,20 @@ class FSM:
         # --- step: znp_last4 (new) ---
         if step == "znp_last4":
             if not (text.isdigit() and len(text) == 4):
-                tg_send(chat, "Введите последние 4 цифры (4 цифры):", NUMERIC_KB)
+                tg_send(chat, "Введите последние 4 цифры:", NUMERIC_INPUT_KB)
                 return
             if "znp_prefix" in data:
                 data["znp"] = f"{data['znp_prefix']}-{text}"
             else:
                 data["znp"] = text
             st["step"] = "meters"
-            tg_send(chat, "Сколько метров брака?", NUMERIC_KB)
+            tg_send(chat, "Сколько метров брака?", NUMERIC_INPUT_KB)
             return
 
         # --- step: meters ---
         if step == "meters":
             if not text.isdigit() or int(text) <= 0:
-                tg_send(chat, "Укажите количество метров брака (число > 0):", NUMERIC_KB)
+                tg_send(chat, "Укажите количество метров брака:", NUMERIC_INPUT_KB)
                 return
             data["meters"] = text
             st["step"] = "defect_type"

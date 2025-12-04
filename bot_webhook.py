@@ -531,27 +531,59 @@ class FSM:
 
         flow = st["flow"]
 
-        # --- Cancel last record ---
         if text == "Отменить последнюю запись":
             if st.get("cancel_used", False):
                 tg_send(chat, "Вы уже отменили одну запись в этом сеансе. Сделайте новую запись, чтобы снова отменить.", FLOW_MENU_KB)
                 return
+        
             sheet = DEFECT_SHEET if flow == "defect" else STARTSTOP_SHEET
             row, rownum = self.sc.find_last_active_record(sheet, uid)
             if not row:
                 tg_send(chat, "У вас нет активных записей для отмены.", FLOW_MENU_KB)
                 return
+        
             st["pending_cancel"] = {"ws": sheet, "row": row, "rownum": rownum}
-            # build preview for confirmation
-            if flow == "startstop":
-                action = "Запуск" if len(row) > 3 and row[3] == "запуск" else "Остановка"
-                msg = (f"Отменить эту запись?\n\n"
-                       f"<b>Старт/Стоп</b>\n{row[0]} {row[1]} | Линия {row[2]}\nДействие: {action}\nПричина: {row[4] if len(row)>4 else '—'}")
+        
+            date, time_ = row[0], row[1]
+            line = row[2]
+        
+            if sheet == STARTSTOP_SHEET:
+                action = "Запуск" if row[3] == "запуск" else "Остановка"
+                reason = row[4] if len(row) > 4 else "—"
+                znp = row[5] if len(row) > 5 else ""
+                meters = row[6] if len(row) > 6 else ""
+                defect_type = row[7] if len(row) > 7 else ""
+        
+                msg = (
+                    f"Вы уверены, что хотите отменить эту запись?\n\n"
+                    f"<b>Старт/Стоп</b>\n"
+                    f"Дата и время: {date} {time_}\n"
+                    f"Линия: {line}\n"
+                    f"Действие: {action}\n"
+                    f"Причина: {reason}\n"
+                )
+                if znp: msg += f"ЗНП: <code>{znp}</code>\n"
+                if meters: msg += f"Метров брака: {meters}\n"
+                if defect_type: msg += f"Вид брака: {defect_type}\n"
+        
             else:
-                msg = (f"Отменить эту запись?\n\n"
-                       f"<b>Брак</b>\n{row[0]} {row[1]} | Линия {row[2]}\nЗНП: <code>{row[4] if len(row)>4 else '—'}</code>\nМетров: {row[5] if len(row)>5 else '—'}\nВид: {row[6] if len(row)>6 else '—'}")
+                znp = row[4] if len(row) > 4 else "—"
+                meters = row[5] if len(row) > 5 else "—"
+                defect_type = row[6] if len(row) > 6 else "—"
+        
+                msg = (
+                    f"Вы уверены, что хотите отменить эту запись?\n\n"
+                    f"<b>Брак</b>\n"
+                    f"Дата и время: {date} {time_}\n"
+                    f"Линия: {line}\n"
+                    f"ЗНП: <code>{znp}</code>\n"
+                    f"Метров: {meters}\n"
+                    f"Вид брака: {defect_type}\n"
+                )
+        
             tg_send(chat, msg, CONFIRM_KB)
             return
+
 
         # --- confirm cancel ---
         if "pending_cancel" in st:
@@ -560,60 +592,99 @@ class FSM:
                 ws_title = pend["ws"]
                 row = pend["row"]
                 rownum = pend["rownum"]
-                # choose status column depending on sheet
-                status_col = "K" if ws_title == STARTSTOP_SHEET else "J"  # K=11, J=10 (1-based)
+        
+                # set status to CANCELLED
+                status_col = "K" if ws_title == STARTSTOP_SHEET else "J"
                 try:
                     self.sc.update_cell(ws_title, f"{status_col}{rownum}", "ОТМЕНЕНО")
                 except Exception:
                     log.exception("Failed to mark canceled")
-                # notify controllers with full info + fio of original user
-                # original user stored in row: in STARTSTOP user is column 9 (index 8), in DEFECT user is column 8 (index7)
+        
+                # build full cancel message for the user
                 if ws_title == STARTSTOP_SHEET:
-                    user_field = row[8] if len(row) > 8 else ""
-                else:
-                    user_field = row[7] if len(row) > 7 else ""
-                # try extract user id from "(<id>)" pattern
-                uid_in_row = None
-                if "(" in user_field and ")" in user_field:
-                    try:
-                        uid_in_row = int(user_field.split("(")[-1].split(")")[0])
-                    except Exception:
-                        uid_in_row = None
-                fio_of_orig = None
-                if uid_in_row:
-                    uobj = self.auth.get_user(uid_in_row)
-                    fio_of_orig = uobj["fio"] if uobj else user_field
-                else:
-                    fio_of_orig = user_field
-                # build cancel message
-                if ws_title == STARTSTOP_SHEET:
-                    action = "Запуск" if len(row) > 3 and row[3] == "запуск" else "Остановка"
+                    date, time_ = row[0], row[1]
+                    line = row[2]
+                    action = "Запуск" if row[3] == "запуск" else "Остановка"
                     reason = row[4] if len(row) > 4 else "—"
-                    msg = (f"ОТМЕНЕНА ЗАПИСЬ СТАРТ/СТОП\nЛиния: {row[2]}\n{row[0]} {row[1]}\nДействие: {action}\nПричина: {reason}\nОтменил: {user['fio']}")
-                    # notify controllers
-                    for cid in get_controllers_cached(CTRL_STARTSTOP_SHEET):
-                        try:
-                            tg_send(cid, msg)
-                        except Exception:
-                            pass
-                else:
+                    znp = row[5] if len(row) > 5 else ""
+                    meters = row[6] if len(row) > 6 else ""
+                    defect_type = row[7] if len(row) > 7 else ""
+        
+                    user_msg = (
+                        f"❌ <b>Запись отменена</b>\n\n"
+                        f"Дата и время: {date} {time_}\n"
+                        f"Линия: {line}\n"
+                        f"Действие: {action}\n"
+                        f"Причина: {reason}\n"
+                    )
+                    if znp: user_msg += f"ЗНП: <code>{znp}</code>\n"
+                    if meters: user_msg += f"Метров брака: {meters}\n"
+                    if defect_type: user_msg += f"Вид брака: {defect_type}\n"
+        
+                    user_msg += f"\nОтменил: {user['fio']}"
+        
+                else:  # DEFECT
+                    date, time_ = row[0], row[1]
+                    line = row[2]
                     znp = row[4] if len(row) > 4 else "—"
                     meters = row[5] if len(row) > 5 else "—"
                     defect_type = row[6] if len(row) > 6 else "—"
-                    msg = (f"ОТМЕНЕНА ЗАПИСЬ БРАКА\nЛиния: {row[2]}\n{row[0]} {row[1]}\nЗНП: <code>{znp}</code>\nМетров: {meters}\nВид: {defect_type}\nОтменил: {user['fio']}")
+        
+                    user_msg = (
+                        f"❌ <b>Запись брака отменена</b>\n\n"
+                        f"Дата и время: {date} {time_}\n"
+                        f"Линия: {line}\n"
+                        f"ЗНП: <code>{znp}</code>\n"
+                        f"Метров: {meters}\n"
+                        f"Вид брака: {defect_type}\n"
+                        f"\nОтменил: {user['fio']}"
+                    )
+        
+                # send message to user
+                tg_send(chat, user_msg, FLOW_MENU_KB)
+        
+                # notify controllers
+                if ws_title == STARTSTOP_SHEET:
+                    ctrl_msg = (
+                        f"⚠️ <b>ОТМЕНЕНА ЗАПИСЬ СТАРТ/СТОП</b>\n\n"
+                        f"Дата и время: {date} {time_}\n"
+                        f"Линия: {line}\n"
+                        f"Действие: {action}\n"
+                        f"Причина: {reason}\n"
+                    )
+                    if znp: ctrl_msg += f"ЗНП: <code>{znp}</code>\n"
+                    if meters: ctrl_msg += f"Метров брака: {meters}\n"
+                    if defect_type: ctrl_msg += f"Вид брака: {defect_type}\n"
+        
+                    ctrl_msg += f"\nОтменил: {user['fio']}"
+        
+                    for cid in get_controllers_cached(CTRL_STARTSTOP_SHEET):
+                        try: tg_send(cid, ctrl_msg)
+                        except: pass
+        
+                else:
+                    ctrl_msg = (
+                        f"⚠️ <b>ОТМЕНЕНА ЗАПИСЬ БРАКА</b>\n\n"
+                        f"Дата и время: {date} {time_}\n"
+                        f"Линия: {line}\n"
+                        f"ЗНП: <code>{znp}</code>\n"
+                        f"Метров: {meters}\n"
+                        f"Вид брака: {defect_type}\n"
+                        f"\nОтменил: {user['fio']}"
+                    )
                     for cid in get_controllers_cached(CTRL_DEFECT_SHEET):
-                        try:
-                            tg_send(cid, msg)
-                        except Exception:
-                            pass
-                tg_send(chat, "Запись отменена!", FLOW_MENU_KB)
+                        try: tg_send(cid, ctrl_msg)
+                        except: pass
+        
                 st["cancel_used"] = True
                 st.pop("pending_cancel", None)
                 return
+        
             if text == "Нет, оставить":
-                tg_send(chat, "Отмена отменена. Запись сохранена.", FLOW_MENU_KB)
+                tg_send(chat, "Запись сохранена.", FLOW_MENU_KB)
                 st.pop("pending_cancel", None)
                 return
+
 
         # --- New record ---
         if text == "Новая запись":

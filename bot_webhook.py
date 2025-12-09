@@ -37,7 +37,6 @@ def now_msk():
     return datetime.now(MSK)
 
 # ==================== Листы ====================
-# Новые поля пользователей: добавлены Подтвердил и Дата подтверждения
 USERS_SHEET = "Пользователи"
 USERS_HEADERS = [
     "TelegramID", "ФИО", "Роль", "Статус",
@@ -58,18 +57,42 @@ def get_ws(sheet_name, headers=None):
 ws_users = get_ws(USERS_SHEET, USERS_HEADERS)
 
 # ==================== Отправка сообщений ====================
-# Используется для уведомлений и ответов пользователю
 def send(chat_id, text, markup=None):
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     if markup:
+        # Теперь markup - это InlineKeyboardMarkup
         payload["reply_markup"] = json.dumps(markup, ensure_ascii=False)
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=10)
     except Exception as e:
         log.exception(f"send error: {e}")
 
+# Отправка ответа на callback_query (важно для исчезновения "часиков" на кнопке)
+def answer_callback(callback_id, text=None):
+    payload = {"callback_query_id": callback_id}
+    if text:
+        payload["text"] = text
+    try:
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery", json=payload, timeout=5)
+    except:
+        pass
+
+# Редактирование сообщения (для замены кнопок после нажатия)
+def edit_message(chat_id, message_id, text, markup=None):
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML"
+    }
+    if markup:
+        payload["reply_markup"] = json.dumps(markup, ensure_ascii=False)
+    try:
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText", json=payload, timeout=10)
+    except:
+        pass
+
 # ==================== Таймауты ====================
-# Оставлены для сохранения базовой структуры состояния и активности
 states = {}
 last_activity = {}
 TIMEOUT = 600
@@ -165,6 +188,7 @@ def get_approvers():
     return res
 
 # Клавиатуры для авторизации
+# MAIN_KB и CANCEL_KB используются для обычных ответов, но их использование сведено к минимуму
 def keyboard(rows):
     return {
         "keyboard": [[{"text": t} for t in row] for row in rows],
@@ -172,28 +196,37 @@ def keyboard(rows):
         "one_time_keyboard": False
     }
 
-MAIN_KB = keyboard([["Старт/Стоп", "Брак"]]) # Оставлена, но не используется в урезанной логике
+MAIN_KB = keyboard([["Старт/Стоп", "Брак"]])
 CANCEL_KB = keyboard([["Отмена"]])
 
+# ==================== Уведомление и выбор роли (Inline) ====================
 def notify_approvers_new_user(uid, fio):
-    """Уведомление всем подтверждённым админам и мастерам с reply-кнопками, отправляющими команды."""
+    """Уведомление всем подтверждённым админам и мастерам с inline-кнопками."""
     approvers = get_approvers()
     if not approvers:
         log.info("No approvers found to notify for new user %s", uid)
         return
 
-    approve_cmd = f"/approve_{uid}"
-    reject_cmd = f"/reject_{uid}"
+    # Callback data для начального действия
+    approve_data = f"pre_approve_{uid}"
+    reject_data = f"reject_{uid}"
 
+    # InlineKeyboardMarkup
     kb = {
-        "keyboard": [[{"text": approve_cmd}, {"text": reject_cmd}], [{"text": "Игнорировать"}]],
-        "resize_keyboard": True,
-        "one_time_keyboard": False
+        "inline_keyboard": [
+            [
+                {"text": "✅ Подтвердить и выбрать роль", "callback_data": approve_data},
+            ],
+            [
+                {"text": "❌ Отклонить", "callback_data": reject_data},
+            ]
+        ]
     }
+    
     text = (f"Новая заявка на доступ:\n"
             f"ФИО: {fio}\n"
             f"TelegramID: {uid}\n\n"
-            f"Нажмите кнопку для быстрого подтверждения или отклонения.")
+            f"Нажмите кнопку для выбора роли или отклонения.")
     for a in approvers:
         try:
             send(a, text, kb)
@@ -204,7 +237,7 @@ def can_approver_confirm(approver_role, target_role):
     """
     Правила подтверждения:
     - admin подтверждает всех
-    - master подтверждает операторов и мастеров, но не админов (вариант B)
+    - master подтверждает операторов и мастеров, но не админов
     """
     if approver_role == "admin":
         return True
@@ -212,90 +245,148 @@ def can_approver_confirm(approver_role, target_role):
         return target_role in ("operator", "master")
     return False
 
-def ask_role_selection(approver_uid, target_uid, fio, approver_role):
+def build_role_selection_kb(target_uid, approver_role):
     """
-    Отправляет сообщение с клавиатурой для выбора роли:
-    options: operator, master (и admin, если approver_role == 'admin')
-    Кнопки отправляют команды формата /setrole_<target_uid>_<role>
+    Создает Inline-клавиатуру для выбора роли.
+    Callback data: confirm_<target_uid>_<role>
     """
     buttons = []
-    buttons.append("operator")
-    buttons.append("master")
+    buttons.append({"text": "Оператор (operator)", "callback_data": f"confirm_{target_uid}_operator"})
+    buttons.append({"text": "Мастер (master)", "callback_data": f"confirm_{target_uid}_master"})
     if approver_role == "admin":
-        buttons.append("admin")
+        buttons.append({"text": "Админ (admin)", "callback_data": f"confirm_{target_uid}_admin"})
 
-    # формируем строки по 2 кнопки в ряд, затем кнопку Отмена
     kb_rows = []
     row = []
     for i, b in enumerate(buttons):
-        row.append(f"/setrole_{target_uid}_{b}")
+        row.append(b)
         if len(row) == 2:
             kb_rows.append(row)
             row = []
     if row:
         kb_rows.append(row)
-    # Команда /cancel_setrole не была определена, но для чистоты оставим кнопку
-    kb_rows.append(["Отмена"]) 
+    
+    # Кнопка отмены выбора (отменяет процесс выбора роли, но не отклоняет заявку)
+    kb_rows.append([{"text": "Отмена выбора роли", "callback_data": f"cancel_confirm_{target_uid}"}])
 
-    kb = {
-        "keyboard": [[{"text": t} for t in r] for r in kb_rows],
-        "resize_keyboard": True,
-        "one_time_keyboard": False
-    }
+    return {"inline_keyboard": kb_rows}
+
+def ask_role_selection(approver_uid, target_uid, fio, approver_role, message_id):
+    """
+    Редактирует сообщение, заменяя кнопки на выбор роли.
+    """
+    kb = build_role_selection_kb(target_uid, approver_role)
 
     msg = (
         f"Вы подтверждаете пользователя:\n"
         f"ФИО: {fio}\n"
         f"TelegramID: {target_uid}\n\n"
-        f"Выберите роль для пользователя:"
+        f"**Выберите роль для пользователя:**"
     )
+    edit_message(approver_uid, message_id, msg, kb)
 
-    send(approver_uid, msg, kb)
 
-def approve_by(approver_uid, target_uid):
+# Функция для обработки предварительного подтверждения (Pre-approve)
+def pre_approve_process(approver_uid, target_uid, message_id):
     approver = get_user(approver_uid)
     target = get_user(target_uid)
 
-    if not approver:
-        send(approver_uid, "Вы не зарегистрированы или не подтверждены — нет прав подтверждать.")
-        return
-
-    if approver["status"] != "подтвержден":
-        send(approver_uid, "Ваш аккаунт не подтвержден — нет прав подтверждать.")
-        return
+    if not approver or approver["status"] != "подтвержден":
+        edit_message(approver_uid, message_id, "Вы не зарегистрированы или не подтверждены — нет прав подтверждать.")
+        return False
 
     if not target:
-        send(approver_uid, f"Пользователь {target_uid} не найден в списке заявок.")
-        return
+        edit_message(approver_uid, message_id, f"Пользователь {target_uid} не найден в списке заявок.")
+        return False
+    
+    # Проверка, что заявка еще в статусе 'ожидает'
+    if target["status"] != "ожидает":
+        edit_message(approver_uid, message_id, f"Заявка пользователя {target['fio']} уже обработана ({target['status']}).")
+        return False
 
-    # Проверка прав (по текущей роли target в таблице)
-    # Используем 'operator' как дефолт, если роль не определена в таблице (что не должно произойти, но для безопасности)
+    # Проверка прав (по текущей роли target в таблице, которая 'operator' для новых)
     target_role_to_check = target["role"] if target["role"] in ("operator", "master", "admin") else "operator"
     if not can_approver_confirm(approver["role"], target_role_to_check):
-        send(approver_uid, "У вас нет прав подтверждать этого пользователя.")
-        return
+        edit_message(approver_uid, message_id, "У вас нет прав подтверждать этого пользователя.")
+        return False
 
-    # Перед подтверждением — предложить выбрать роль
-    ask_role_selection(approver_uid, target_uid, target["fio"], approver["role"])
+    # Переход к выбору роли
+    ask_role_selection(approver_uid, target_uid, target["fio"], approver["role"], message_id)
+    return True
 
-def reject_by(approver_uid, target_uid):
+# Функция для обработки финального подтверждения (Confirm)
+def confirm_process(approver_uid, target_uid, new_role, message_id):
     approver = get_user(approver_uid)
     target = get_user(target_uid)
-    if not approver:
-        send(approver_uid, "Вы не зарегистрированы или не подтверждены — нет прав отклонять.")
-        return
-    if approver["status"] != "подтвержден":
-        send(approver_uid, "Ваш аккаунт не подтвержден — нет прав отклонять.")
-        return
-    if not target:
-        send(approver_uid, f"Пользователь {target_uid} не найден.")
-        return
 
-    # Проверка на master/admin права для отклонения, как в approve_by (подразумевается, что отклонять можно тех, кого можно подтверждать)
+    if not approver or approver["status"] != "подтвержден":
+        edit_message(approver_uid, message_id, "Вы не можете назначать роли.")
+        return False
+
+    if not target:
+        edit_message(approver_uid, message_id, "Целевой пользователь не найден.")
+        return False
+    
+    # Проверка, что заявка еще в статусе 'ожидает'
+    if target["status"] != "ожидает":
+        edit_message(approver_uid, message_id, f"Заявка пользователя {target['fio']} уже обработана ({target['status']}).")
+        return False
+
+    # Проверка разрешений мастера
+    if approver["role"] == "master" and new_role == "admin":
+        edit_message(approver_uid, message_id, "Мастер не может назначать роль admin.")
+        return False
+
+    # Проверка прав (должен быть возможность подтвердить эту роль)
+    if not can_approver_confirm(approver["role"], new_role):
+        edit_message(approver_uid, message_id, "У вас нет прав назначать такую роль.")
+        return False
+
+    # Назначаем роль и статус подтверждён
+    update_user_role(target_uid, new_role)
+    update_user_status(target_uid, "подтвержден")
+
+    # Записываем подтверждающего и дату
+    idx = find_user_row_index(target_uid)
+    if idx:
+        try:
+            ws_users.update(f"G{idx}", [[str(approver_uid)]])
+            ws_users.update(f"H{idx}", [[now_msk().strftime("%Y-%m-%d %H:%M:%S")]])
+        except Exception as e:
+            log.exception("confirm_process: writing confirm data error: %s", e)
+
+    final_msg = f"✅ **Подтверждено!** Пользователь **{target['fio']}** получил роль **{new_role}**."
+    edit_message(approver_uid, message_id, final_msg)
+    
+    try:
+        send(int(target_uid), f"Ваша заявка подтверждена! Ваша роль: {new_role}.")
+    except:
+        pass
+    return True
+
+# Функция для обработки отклонения (Reject)
+def reject_process(approver_uid, target_uid, message_id):
+    approver = get_user(approver_uid)
+    target = get_user(target_uid)
+    
+    if not approver or approver["status"] != "подтвержден":
+        edit_message(approver_uid, message_id, "У вас нет прав отклонять заявки.")
+        return False
+
+    if not target:
+        edit_message(approver_uid, message_id, f"Пользователь {target_uid} не найден.")
+        return False
+    
+    # Проверка, что заявка еще в статусе 'ожидает'
+    if target["status"] != "ожидает":
+        edit_message(approver_uid, message_id, f"Заявка пользователя {target['fio']} уже обработана ({target['status']}).")
+        return False
+
+    # Проверка прав
     target_role_to_check = target["role"] if target["role"] in ("operator", "master", "admin") else "operator"
     if not can_approver_confirm(approver["role"], target_role_to_check):
-        send(approver_uid, "У вас нет прав отклонять этого пользователя.")
-        return
+        edit_message(approver_uid, message_id, "У вас нет прав отклонять этого пользователя.")
+        return False
 
     # Ставим статус "отклонен"
     update_user_status(target_uid, "отклонен")
@@ -304,119 +395,74 @@ def reject_by(approver_uid, target_uid):
     if idx:
         try:
             # Запись, кто отклонил и когда
-            ws_users.update(f"G{idx}", str(approver_uid))  # Подтвердил (кто отклонил)
-            ws_users.update(f"H{idx}", now_msk().strftime("%Y-%m-%d %H:%M:%S"))
+            ws_users.update(f"G{idx}", [[str(approver_uid)]])
+            ws_users.update(f"H{idx}", [[now_msk().strftime("%Y-%m-%d %H:%M:%S")]])
         except Exception as e:
-            log.exception("reject_by: update sheet error %s", e)
+            log.exception("reject_process: update sheet error %s", e)
 
-    send(approver_uid, f"Заявка пользователя {target['fio']} отклонена.")
+    reject_msg = f"❌ **Отклонено.** Заявка пользователя **{target['fio']}** отклонена."
+    edit_message(approver_uid, message_id, reject_msg)
+    
     try:
         send(int(target_uid), "В доступе отказано.")
     except:
         pass
+    return True
+
+# Функция для отмены выбора роли
+def cancel_confirm_process(approver_uid, target_uid, message_id):
+    target = get_user(target_uid)
+    if not target or target["status"] != "ожидает":
+        edit_message(approver_uid, message_id, "Заявка уже обработана или не найдена.")
+        return False
+
+    # Восстанавливаем исходное сообщение с кнопками pre_approve и reject
+    fio = target["fio"]
+    approve_data = f"pre_approve_{target_uid}"
+    reject_data = f"reject_{target_uid}"
+
+    kb = {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Подтвердить и выбрать роль", "callback_data": approve_data},
+            ],
+            [
+                {"text": "❌ Отклонить", "callback_data": reject_data},
+            ]
+        ]
+    }
+    
+    text = (f"Новая заявка на доступ:\n"
+            f"ФИО: {fio}\n"
+            f"TelegramID: {target_uid}\n\n"
+            f"Выбор роли отменён. Нажмите кнопку для выбора роли или отклонения.")
+    edit_message(approver_uid, message_id, text, kb)
+    return True
+
 
 # ==================== Основная логика ====================
-def process(uid, chat, text, user_repr):
+def process_message(uid, chat, text):
+    """Обрабатывает текстовые сообщения (заявки на регистрацию и команды /start/Отмена)."""
     last_activity[uid] = time.time()
-
-    # Инициализация состояния для нового пользователя
+    
     if uid not in states:
-        states[uid] = {"chat": chat, "cancel_used": False}
+        states[uid] = {"chat": chat}
 
     state = states[uid]
-
-    # ---- обработка выбора роли ----
-    # формат команды: /setrole_<target_uid>_<role>
-    if text.startswith("/setrole_"):
-        try:
-            payload = text[len("/setrole_"):]
-            # payload: "<target_uid>_<role>"
-            parts = payload.split("_", 1)
-            if len(parts) != 2:
-                send(chat, "Неверная команда выбора роли.")
-                return
-            target_uid = parts[0]
-            new_role = parts[1]
-        except Exception:
-            send(chat, "Неверная команда выбора роли.")
-            return
-
-        approver = get_user(uid)
-        target = get_user(target_uid)
-
-        if not approver or approver["status"] != "подтвержден":
-            send(chat, "Вы не можете назначать роли.")
-            return
-
-        if not target:
-            send(chat, "Целевой пользователь не найден.")
-            return
-
-        # Проверка разрешений мастера: мастер не может назначать admin
-        if approver["role"] == "master" and new_role == "admin":
-            send(chat, "Мастер не может назначать роль admin.")
-            return
-
-        # Проверить допустимые роли
-        if new_role not in ("operator", "master", "admin"):
-            send(chat, "Неверная роль.")
-            return
-
-        # Проверка: master не должен назначать higher role beyond allowed by can_approver_confirm
-        if not can_approver_confirm(approver["role"], new_role if new_role in ("operator","master","admin") else "operator"):
-            send(chat, "У вас нет прав назначать такую роль.")
-            return
-
-        # Назначаем роль и статус подтверждён
-        update_user_role(target_uid, new_role)
-        update_user_status(target_uid, "подтвержден")
-
-        # Записываем подтверждающего и дату
-        idx = find_user_row_index(target_uid)
-        if idx:
-            try:
-                ws_users.update(f"G{idx}", [[str(uid)]])
-                ws_users.update(f"H{idx}", [[now_msk().strftime("%Y-%m-%d %H:%M:%S")]])
-            except Exception as e:
-                log.exception("setrole: writing confirm data error: %s", e)
-
-        send(chat, f"Пользователь {target['fio']} подтверждён и получил роль {new_role}.")
-        try:
-            send(int(target_uid), f"Ваша заявка подтверждена! Ваша роль: {new_role}.")
-        except:
-            pass
-        return
-
-    # === Обработка быстрых команд подтверждения/отклонения (от админов/мастеров) ===
-    # форматы: /approve_<uid> и /reject_<uid>
-    if text.startswith("/approve_") or text.startswith("/reject_"):
-        parts = text.split("_", 1)
-        if len(parts) == 2:
-            cmd = parts[0]
-            target_part = parts[1]
-            target_id = "".join(ch for ch in target_part if ch.isdigit())
-            if not target_id:
-                send(chat, "Неверный формат команды.")
-                return
-            if text.startswith("/approve_"):
-                # Вместо мгновенного подтверждения, открываем выбор роли (ask_role_selection)
-                approve_by(uid, target_id)
-            else:
-                reject_by(uid, target_id)
-            return
-
-    # === Проверка пользователя (авторизация) ===
+    
+    # --- Проверка пользователя (авторизация) ---
     u = get_user(uid)
-
+    
     # Если нет в таблице — спросить ФИО (заявка на регистрацию)
     if u is None:
-        # если уже ждали ФИО — обработать введённое как ФИО
         if state.get("fio_wait"):
             fio = text.strip()
-            if not fio:
-                send(chat, "Введите корректное ФИО:", CANCEL_KB)
+            if not fio or fio == "Отмена":
+                send(chat, "Операция отменена. Для регистрации введите /start", MAIN_KB)
+                states.pop(uid, None)
                 return
-            add_user(uid, fio, requested_by="")
+                
+            add_user(uid, fio)
             notify_approvers_new_user(uid, fio)
             send(chat, "Спасибо! Ваша заявка отправлена на подтверждение.")
             states.pop(uid, None)
@@ -424,28 +470,64 @@ def process(uid, chat, text, user_repr):
         else:
             # попросить ФИО
             states[uid]["fio_wait"] = True
-            send(chat, "Вы не зарегистрированы. Введите ваше ФИО:")
+            send(chat, "Вы не зарегистрированы. Введите ваше ФИО:", CANCEL_KB)
             return
 
-    # Пользователь найден, но не подтвержден (статус "ожидает" или "отклонен")
+    # Пользователь найден, но не подтвержден
     if u["status"] != "подтвержден":
         send(chat, "Ваш доступ пока не подтверждён администратором.")
         return
 
-    # === Главные команды ===
-    # Оставлены только команды, которые могут завершить диалог
-    if text == "Отмена":
-        states.pop(uid, None) # Выход из любого состояния
-        send(chat, "Отменено.", MAIN_KB)
-        return
-        
-    if text == "/start":
+    # === Главные команды (для подтвержденных пользователей) ===
+    if text in ("/start", "Отмена"):
+        send(chat, "Ваш доступ подтверждён.", MAIN_KB)
         states.pop(uid, None)
-        send(chat, "Добро пожаловать. Ваш доступ подтверждён.", MAIN_KB)
+        return
+    
+    # Если подтвержденный пользователь ввел что-то другое
+    send(chat, "Ваш доступ подтверждён.", MAIN_KB)
+
+
+def process_callback_query(callback_query):
+    """Обрабатывает нажатия на Inline-кнопки."""
+    uid = callback_query["from"]["id"]
+    data = callback_query["data"]
+    message = callback_query["message"]
+    chat_id = message["chat"]["id"]
+    message_id = message["message_id"]
+
+    answer_callback(callback_query["id"])
+
+    # 1. Начальное подтверждение
+    if data.startswith("pre_approve_"):
+        target_uid = data.split("_")[-1]
+        pre_approve_process(uid, target_uid, message_id)
         return
 
-    # Если пользователь подтвержден, но ввел что-то, не относящееся к авторизации (оставленные команды)
-    send(chat, "Выберите действие:", MAIN_KB)
+    # 2. Финальное подтверждение (выбор роли)
+    if data.startswith("confirm_"):
+        try:
+            parts = data.split("_")
+            target_uid = parts[1]
+            new_role = parts[2]
+        except IndexError:
+            edit_message(chat_id, message_id, "Ошибка: неверный формат данных.")
+            return
+
+        confirm_process(uid, target_uid, new_role, message_id)
+        return
+
+    # 3. Отклонение
+    if data.startswith("reject_"):
+        target_uid = data.split("_")[-1]
+        reject_process(uid, target_uid, message_id)
+        return
+
+    # 4. Отмена выбора роли
+    if data.startswith("cancel_confirm_"):
+        target_uid = data.split("_")[-1]
+        cancel_confirm_process(uid, target_uid, message_id)
+        return
 
 
 # ==================== Flask ====================
@@ -457,7 +539,6 @@ if os.getenv("RENDER"):
     domain = os.getenv("RENDER_EXTERNAL_HOSTNAME")
     if token and domain:
         url = f"https://{domain}/"
-        # Установка вебхука
         requests.get(f"https://api.telegram.org/bot{token}/setWebhook?url={url}")
         print(f"Вебхук установлен: {url}")
 
@@ -467,20 +548,18 @@ def webhook():
     if not update:
         return "ok", 200
 
-    # Telegram may post different update types; we handle 'message'
-    if "message" not in update:
-        return "ok", 200
-
-    m = update["message"]
-    chat_id = m["chat"]["id"]
-    user_id = m["from"]["id"]
-    text = (m.get("text") or "").strip()
-    username = m["from"].get("username", "")
-    user_repr = f"{user_id} (@{username or 'no_user'})"
-
     with FileLock(LOCK_PATH):
         try:
-            process(user_id, chat_id, text, user_repr)
+            if "message" in update:
+                m = update["message"]
+                user_id = m["from"]["id"]
+                chat_id = m["chat"]["id"]
+                text = (m.get("text") or "").strip()
+                process_message(user_id, chat_id, text)
+            
+            elif "callback_query" in update:
+                process_callback_query(update["callback_query"])
+        
         except Exception as e:
             log.exception("processing error: %s", e)
     return "ok", 200

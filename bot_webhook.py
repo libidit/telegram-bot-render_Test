@@ -668,7 +668,7 @@ class FSM:
             # confirmation message
             confirm_text = (
                 f"✅ <b>Запись сохранена</b>\n\n"
-                f"Лист: {target_sheet}\n"
+                f"{target_sheet}\n"
                 f"Дата: <b>{data.get('date','')}</b>\n"
                 f"Смена: <b>{data.get('shift','')}</b>\n"
                 f"Продукция: <b>{data.get('product','')}</b>\n"

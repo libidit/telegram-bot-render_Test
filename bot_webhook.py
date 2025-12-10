@@ -620,7 +620,7 @@ class FSM:
             if recent:
                 # show up to 5
                 lines = []
-                for r in recent[-5:]:
+                for r in reversed(recent[-5:]):
                     date = r[0] if len(r) > 0 else ""
                     shift = r[1] if len(r) > 1 else ""
                     prod = r[2] if len(r) > 2 else ""

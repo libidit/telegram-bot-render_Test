@@ -1,21 +1,23 @@
-# V1.0 — Только авторизация
+# bot_webhook.py
+# Обновлённая версия под "Выпуск РФ" и "Выпуск ППИ"
 import os
 import json
 import logging
-import requests
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from typing import List, Optional, Tuple, Dict, Any
 
 from flask import Flask, request
 import gspread
 from google.oauth2 import service_account
 from filelock import FileLock
+import requests
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
 
-# ==================== ENV & GSPREAD INIT ====================
+# ========== ENV ==========
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
@@ -23,6 +25,7 @@ GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 if not all([TELEGRAM_TOKEN, SPREADSHEET_ID, GOOGLE_CREDS_JSON]):
     raise RuntimeError("Missing required env vars")
 
+# ========== Google Sheets init ==========
 creds_dict = json.loads(GOOGLE_CREDS_JSON)
 creds = service_account.Credentials.from_service_account_info(
     creds_dict,
@@ -31,685 +34,691 @@ creds = service_account.Credentials.from_service_account_info(
 gc = gspread.authorize(creds)
 sh = gc.open_by_key(SPREADSHEET_ID)
 
-# ==================== Московское время ====================
+# ========== Time helpers ==========
 MSK = timezone(timedelta(hours=3))
-def now_msk():
+
+
+def now_msk() -> datetime:
     return datetime.now(MSK)
 
-# ==================== Листы и Заголовки ====================
+
+def now_msk_str() -> str:
+    return now_msk().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ========== Sheet names & headers ==========
+# New production sheets
+RF_SHEET = "Выпуск РФ"       # Ротационное формование
+PPI_SHEET = "Выпуск ППИ"     # Полимерно-песчаное производство
+
+# Controllers lists (who should be notified for each flow)
+CTRL_RF_SHEET = "Контр_Выпуск_РФ"
+CTRL_PPI_SHEET = "Контр_Выпуск_ППИ"
 USERS_SHEET = "Пользователи"
-PRODUCTION_RF_SHEET = "Продукция РФ"
-PRODUCTION_PPI_SHEET = "Продукция ППИ"
-OUTPUT_RF_SHEET = "Выпуск РФ"
-OUTPUT_PPI_PPI = "Выпуск ППИ"
 
-USERS_HEADERS = [
-    "TelegramID", "ФИО", "Роль", "Статус",
-    "Запросил у", "Дата создания",
-    "Подтвердил", "Дата подтверждения"
-]
-OUTPUT_HEADERS = [
-    "Дата", "Смена", "Продукция", "Количество",
-    "Пользователь", "Время отправки", "Статус"
-]
+# Headers for the new sheets:
+# Date | Shift | Product | Quantity | User | TS | Status
+PROD_HEADERS = ["Дата", "Смена", "Продукция", "Количество", "Пользователь", "Время отправки", "Статус"]
+USERS_HEADERS = ["TelegramID", "ФИО", "Роль", "Статус", "Запросил у", "Дата создания", "Подтвердил", "Дата подтверждения"]
 
-def get_ws(sheet_name, headers=None):
-    try:
-        ws = sh.worksheet(sheet_name)
-    except gspread.exceptions.WorksheetNotFound:
-        ws = sh.add_worksheet(title=sheet_name, rows=3000, cols=20)
-    if headers and ws.row_values(1) != headers:
-        ws.clear()
-        ws.insert_row(headers, 1)
-    return ws
-
-# Инициализация рабочих листов
-ws_users = get_ws(USERS_SHEET, USERS_HEADERS)
-ws_output_rf = get_ws(OUTPUT_RF_SHEET, OUTPUT_HEADERS)
-ws_output_ppi = get_ws(OUTPUT_PPI_PPI, OUTPUT_HEADERS)
-ws_prod_rf = get_ws(PRODUCTION_RF_SHEET, ["Код", "Название"])
-ws_prod_ppi = get_ws(PRODUCTION_PPI_SHEET, ["Код", "Название"])
-
-# Загрузка справочников продукции
-def load_products(ws):
-    try:
-        # Предполагаем, что столбец 1 - Код, столбец 2 - Название
-        values = ws.get_all_values()
-        # Возвращаем {Название: Код} для удобства поиска
-        return {row[1]: row[0] for row in values[1:] if len(row) >= 2 and row[1]}
-    except Exception as e:
-        log.error(f"Error loading products from {ws.title}: {e}")
-        return {}
-
-products_rf = load_products(ws_prod_rf)
-products_ppi = load_products(ws_prod_ppi)
-
-# ==================== Отправка сообщений & KB (Standard/Inline) ====================
-def send(chat_id, text, markup=None):
+# ========== Telegram send wrapper ==========
+def tg_send(chat_id: int, text: str, markup: Optional[dict] = None):
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     if markup:
         payload["reply_markup"] = json.dumps(markup, ensure_ascii=False)
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=10)
     except Exception as e:
-        log.exception(f"send error: {e}")
+        log.exception("tg_send error: %s", e)
 
-def answer_callback(callback_id, text=None):
-    payload = {"callback_query_id": callback_id}
-    if text:
-        payload["text"] = text
-    try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery", json=payload, timeout=5)
-    except:
-        pass
 
-def edit_message(chat_id, message_id, text, markup=None):
-    payload = {
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "text": text,
-        "parse_mode": "HTML"
-    }
-    if markup:
-        payload["reply_markup"] = json.dumps(markup, ensure_ascii=False)
-    try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText", json=payload, timeout=10)
-    except:
-        pass
+# ========== SheetClient — encapsulate sheet ops + caching ==========
+class SheetClient:
+    def __init__(self, sh_obj, cache_ttl: int = 5):
+        self.sh = sh_obj
+        self.cache_ttl = cache_ttl
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        # ensure sheets & headers
+        self._ensure_sheet(RF_SHEET, PROD_HEADERS)
+        self._ensure_sheet(PPI_SHEET, PROD_HEADERS)
+        self._ensure_sheet(USERS_SHEET, USERS_HEADERS)
+        # ensure controllers sheets exist (no headers required)
+        self._ensure_sheet(CTRL_RF_SHEET, None)
+        self._ensure_sheet(CTRL_PPI_SHEET, None)
 
-# Стандартные клавиатуры
-def keyboard(rows):
-    return {
-        "keyboard": [[{"text": t} for t in row] for row in rows],
-        "resize_keyboard": True,
-        "one_time_keyboard": False
-    }
+    def _ensure_sheet(self, title: str, headers: Optional[List[str]]):
+        try:
+            ws = self.sh.worksheet(title)
+        except gspread.exceptions.WorksheetNotFound:
+            ws = self.sh.add_worksheet(title=title, rows=3000, cols=20)
+        if headers:
+            current = ws.row_values(1)
+            if current != headers:
+                ws.clear()
+                ws.insert_row(headers, 1)
 
-# Главное меню
-MAIN_KB = keyboard([
-    ["Ротационное формование", "Полимерно-песчаное производство"],
-    ["Отмена"]
-])
-# Клавиатура Отмены для текстового ввода
-CANCEL_KB = keyboard([["Отмена"]])
+    def _ws(self, title: str):
+        return self.sh.worksheet(title)
 
-# ==================== Таймауты ====================
-states = {}
-last_activity = {}
-TIMEOUT = 600
+    def _get_all_values_cached(self, title: str) -> List[List[str]]:
+        now_ts = time.time()
+        c = self._cache.get(title)
+        if c and c.get("until", 0) > now_ts:
+            return c["data"]
+        try:
+            data = self._ws(title).get_all_values()
+        except Exception as e:
+            log.exception("Error reading sheet %s: %s", title, e)
+            data = []
+        self._cache[title] = {"data": data, "until": now_ts + self.cache_ttl}
+        return data
 
-def timeout_worker():
-    while True:
-        time.sleep(30)
-        now = time.time()
-        for uid in list(states):
-            if now - last_activity.get(uid, now) > TIMEOUT:
-                try:
-                    send(states[uid]["chat"], "Диалог прерван — неактивность 10 минут.", MAIN_KB)
-                except:
-                    pass
-                states.pop(uid, None)
-                last_activity.pop(uid, None)
+    def invalidate_cache(self, title: Optional[str] = None):
+        if title:
+            self._cache.pop(title, None)
+        else:
+            self._cache.clear()
 
-threading.Thread(target=timeout_worker, daemon=True).start()
+    # Users operations
+    def get_users_rows(self) -> List[List[str]]:
+        return self._get_all_values_cached(USERS_SHEET)
 
-# ==================== Авторизация (сохранена) ====================
-# (get_user, add_user, find_user_row_index, update_user_status, update_user_role, get_approvers, can_approver_confirm, notify_approvers_new_user, pre_approve_process, confirm_process, reject_process, cancel_confirm_process)
-# ... [Функции авторизации остаются без изменений, как в предыдущем ответе] ...
-def get_user(uid):
-    try:
-        values = ws_users.get_all_values()
-        for row in values[1:]:
+    def find_user(self, uid: int) -> Optional[Dict[str, str]]:
+        rows = self.get_users_rows()
+        for row in rows[1:]:
             if row and row[0] == str(uid):
+                fio = row[1] if len(row) > 1 else ""
                 role = row[2] if len(row) > 2 and row[2].strip() else "operator"
                 status = row[3] if len(row) > 3 and row[3].strip() else "ожидает"
-                fio = row[1] if len(row) > 1 else ""
-                return {"id": str(uid), "fio": fio, "role": role, "status": status}
-    except Exception as e:
-        log.exception("get_user error: %s", e)
-    return None
+                return {"id": str(uid), "fio": fio.strip(), "role": role.strip(), "status": status.strip()}
+        return None
 
-def add_user(uid, fio, requested_by=""):
-    try:
-        ws_users.append_row([
-            str(uid), fio, "operator", "ожидает", requested_by or "",
-            now_msk().strftime("%Y-%m-%d %H:%M:%S"), "", ""
-        ], value_input_option="USER_ENTERED")
-    except Exception as e:
-        log.exception("add_user error: %s", e)
+    def add_user(self, uid: int, fio: str, requested_by: str = ""):
+        try:
+            self._ws(USERS_SHEET).append_row(
+                [str(uid), fio.strip(), "operator", "ожидает", requested_by or "", now_msk_str(), "", ""],
+                value_input_option="USER_ENTERED"
+            )
+            self.invalidate_cache(USERS_SHEET)
+        except Exception as e:
+            log.exception("add_user error: %s", e)
 
-def find_user_row_index(uid):
-    try:
-        values = ws_users.get_all_values()
-        for idx, row in enumerate(values[1:], start=2):
+    def find_user_row_index(self, uid: int) -> Optional[int]:
+        rows = self.get_users_rows()
+        for idx, row in enumerate(rows[1:], start=2):
             if row and row[0] == str(uid):
                 return idx
-    except Exception as e:
-        log.exception("find_user_row_index error: %s", e)
-    return None
+        return None
 
-def update_user_status(uid, status):
-    idx = find_user_row_index(uid)
-    if idx:
+    def update_user(self, uid: int, role: Optional[str] = None, status: Optional[str] = None, confirmed_by: Optional[int] = None):
+        idx = self.find_user_row_index(uid)
+        if not idx:
+            return
         try:
-            ws_users.update(f"D{idx}", [[status]])
+            if role:
+                self._ws(USERS_SHEET).update(f"C{idx}", [[role]])
+            if status:
+                self._ws(USERS_SHEET).update(f"D{idx}", [[status]])
+            if confirmed_by:
+                self._ws(USERS_SHEET).update(f"G{idx}", [[str(confirmed_by)]])
+                self._ws(USERS_SHEET).update(f"H{idx}", [[now_msk_str()]])
+            self.invalidate_cache(USERS_SHEET)
         except Exception as e:
-            log.exception("update_user_status error: %s", e)
+            log.exception("update_user error: %s", e)
 
-def update_user_role(uid, role):
-    idx = find_user_row_index(uid)
-    if idx:
-        try:
-            ws_users.update(f"C{idx}", [[role]])
-        except Exception as e:
-            log.exception("update_user_role error: %s", e)
-
-def get_approvers():
-    res = []
-    try:
-        values = ws_users.get_all_values()[1:]
-        for row in values:
-            if len(row) >= 4:
-                role = row[2].strip() if row[2] else ""
-                status = row[3].strip() if row[3] else ""
+    def get_approvers(self) -> List[int]:
+        res = []
+        rows = self.get_users_rows()[1:]
+        for row in rows:
+            try:
+                role = (row[2] if len(row) > 2 else "").strip()
+                status = (row[3] if len(row) > 3 else "").strip()
                 if role in ("admin", "master") and status == "подтвержден":
                     if row[0].strip().isdigit():
                         res.append(int(row[0].strip()))
-    except Exception as e:
-        log.exception("get_approvers error: %s", e)
-    return res
+            except Exception:
+                continue
+        return res
 
-def can_approver_confirm(approver_role, target_role):
-    if approver_role == "admin":
-        return True
-    if approver_role == "master":
-        return target_role in ("operator", "master")
-    return False
-
-def build_role_selection_kb(target_uid, approver_role):
-    buttons = []
-    buttons.append({"text": "Оператор (operator)", "callback_data": f"confirm_{target_uid}_operator"})
-    buttons.append({"text": "Мастер (master)", "callback_data": f"confirm_{target_uid}_master"})
-    if approver_role == "admin":
-        buttons.append({"text": "Админ (admin)", "callback_data": f"confirm_{target_uid}_admin"})
-
-    kb_rows = []
-    row = []
-    for b in buttons:
-        row.append(b)
-        if len(row) == 2:
-            kb_rows.append(row)
-            row = []
-    if row:
-        kb_rows.append(row)
-    kb_rows.append([{"text": "Отмена выбора роли", "callback_data": f"cancel_confirm_{target_uid}"}])
-    return {"inline_keyboard": kb_rows}
-
-def ask_role_selection(approver_uid, target_uid, fio, approver_role, message_id):
-    kb = build_role_selection_kb(target_uid, approver_role)
-    msg = (f"Вы подтверждаете пользователя:\nФИО: {fio}\nTelegramID: {target_uid}\n\n"
-           f"**Выберите роль для пользователя:**")
-    edit_message(approver_uid, message_id, msg, kb)
-
-def notify_approvers_new_user(uid, fio):
-    approvers = get_approvers()
-    if not approvers:
-        log.info("No approvers found to notify for new user %s", uid)
-        return
-
-    approve_data = f"pre_approve_{uid}"
-    reject_data = f"reject_{uid}"
-    kb = {"inline_keyboard": [[{"text": "✅ Подтвердить и выбрать роль", "callback_data": approve_data},],
-                              [{"text": "❌ Отклонить", "callback_data": reject_data},]]}
-    text = (f"Новая заявка на доступ:\nФИО: {fio}\nTelegramID: {uid}\n\n"
-            f"Нажмите кнопку для выбора роли или отклонения.")
-    for a in approvers:
+    # Controllers (plain read)
+    def get_controllers(self, title: str) -> List[int]:
         try:
-            send(a, text, kb)
+            ws = self._ws(title)
+            ids = ws.col_values(1)[1:]
+            return [int(i.strip()) for i in ids if i.strip().isdigit()]
         except Exception as e:
-            log.exception("notify approver error: %s", e)
+            log.exception("get_controllers(%s) error: %s", title, e)
+            return []
 
-def pre_approve_process(approver_uid, target_uid, message_id):
-    approver = get_user(approver_uid)
-    target = get_user(target_uid)
-    if not approver or approver["status"] != "подтвержден":
-        edit_message(approver_uid, message_id, "Вы не зарегистрированы или не подтверждены — нет прав подтверждать.")
-        return False
-    if not target:
-        edit_message(approver_uid, message_id, f"Пользователь {target_uid} не найден в списке заявок.")
-        return False
-    if target["status"] != "ожидает":
-        edit_message(approver_uid, message_id, f"Заявка пользователя {target['fio']} уже обработана ({target['status']}).")
-        return False
-    target_role_to_check = target["role"] if target["role"] in ("operator", "master", "admin") else "operator"
-    if not can_approver_confirm(approver["role"], target_role_to_check):
-        edit_message(approver_uid, message_id, "У вас нет прав подтверждать этого пользователя.")
-        return False
-    ask_role_selection(approver_uid, target_uid, target["fio"], approver["role"], message_id)
-    return True
-
-def confirm_process(approver_uid, target_uid, new_role, message_id):
-    approver = get_user(approver_uid)
-    target = get_user(target_uid)
-    if not approver or approver["status"] != "подтвержден":
-        edit_message(approver_uid, message_id, "Вы не можете назначать роли.")
-        return False
-    if not target:
-        edit_message(approver_uid, message_id, "Целевой пользователь не найден.")
-        return False
-    if target["status"] != "ожидает":
-        edit_message(approver_uid, message_id, f"Заявка пользователя {target['fio']} уже обработана ({target['status']}).")
-        return False
-    if approver["role"] == "master" and new_role == "admin":
-        edit_message(approver_uid, message_id, "Мастер не может назначать роль admin.")
-        return False
-    if not can_approver_confirm(approver["role"], new_role):
-        edit_message(approver_uid, message_id, "У вас нет прав назначать такую роль.")
-        return False
-
-    update_user_role(target_uid, new_role)
-    update_user_status(target_uid, "подтвержден")
-
-    idx = find_user_row_index(target_uid)
-    if idx:
+    # Records
+    def append_record(self, sheet_title: str, row: List[Any]):
         try:
-            ws_users.update(f"G{idx}", [[str(approver_uid)]])
-            ws_users.update(f"H{idx}", [[now_msk().strftime("%Y-%m-%d %H:%M:%S")]])
+            self._ws(sheet_title).append_row(row, value_input_option="USER_ENTERED")
+            self.invalidate_cache(sheet_title)
         except Exception as e:
-            log.exception("confirm_process: writing confirm data error: %s", e)
+            log.exception("append_record error: %s", e)
 
-    final_msg = f"✅ **Подтверждено!** Пользователь **{target['fio']}** получил роль **{new_role}**."
-    edit_message(approver_uid, message_id, final_msg)
-    try:
-        send(int(target_uid), f"Ваша заявка подтверждена! Ваша роль: {new_role}.")
-    except:
-        pass
-    return True
+    def get_last_records(self, sheet_title: str, n: int = 5) -> List[List[str]]:
+        vals = self._get_all_values_cached(sheet_title)
+        if len(vals) <= 1:
+            return []
+        return vals[-n:]
 
-def reject_process(approver_uid, target_uid, message_id):
-    approver = get_user(approver_uid)
-    target = get_user(target_uid)
-    if not approver or approver["status"] != "подтвержден":
-        edit_message(approver_uid, message_id, "У вас нет прав отклонять заявки.")
-        return False
-    if not target:
-        edit_message(approver_uid, message_id, f"Пользователь {target_uid} не найден.")
-        return False
-    if target["status"] != "ожидает":
-        edit_message(approver_uid, message_id, f"Заявка пользователя {target['fio']} уже обработана ({target['status']}).")
-        return False
-    target_role_to_check = target["role"] if target["role"] in ("operator", "master", "admin") else "operator"
-    if not can_approver_confirm(approver["role"], target_role_to_check):
-        edit_message(approver_uid, message_id, "У вас нет прав отклонять этого пользователя.")
-        return False
-
-    update_user_status(target_uid, "отклонен")
-
-    idx = find_user_row_index(target_uid)
-    if idx:
+    def update_cell(self, sheet_title: str, cell: str, value: Any):
         try:
-            ws_users.update(f"G{idx}", [[str(approver_uid)]])
-            ws_users.update(f"H{idx}", [[now_msk().strftime("%Y-%m-%d %H:%M:%S")]])
+            self._ws(sheet_title).update(cell, [[value]])
+            self.invalidate_cache(sheet_title)
         except Exception as e:
-            log.exception("reject_process: update sheet error %s", e)
+            log.exception("update_cell error: %s", e)
 
-    reject_msg = f"❌ **Отклонено.** Заявка пользователя **{target['fio']}** отклонена."
-    edit_message(approver_uid, message_id, reject_msg)
+    def find_last_active_record(self, sheet_title: str, uid: int) -> Tuple[Optional[List[str]], Optional[int]]:
+        """
+        Find last record for user (user ID appears as "(<id>)" in Пользователь column).
+        New production sheets format:
+        0: Дата, 1: Смена, 2: Продукция, 3: Количество, 4: Пользователь, 5: Время отправки, 6: Статус
+        Returns (row, row_number) or (None, None).
+        """
+        vals = self._get_all_values_cached(sheet_title)
+        if not vals or len(vals) <= 1:
+            return None, None
+        user_idx = 4  # 0-based index
+        status_idx = 6
+        for i in range(len(vals) - 1, 0, -1):
+            row = vals[i]
+            if len(row) <= user_idx:
+                continue
+            try:
+                cell_user = row[user_idx]
+            except Exception:
+                continue
+            if f"({uid})" in cell_user:
+                status = row[status_idx] if len(row) > status_idx else ""
+                if status.strip() != "ОТМЕНЕНО":
+                    return row, i + 1
+        return None, None
+
+
+# instantiate
+sheet_client = SheetClient(sh, cache_ttl=5)
+
+# ========== Keyboards & helpers ==========
+def kb_reply(rows: List[List[str]], one_time: bool = False, placeholder: Optional[str] = None, input_field_placeholder: Optional[str] = None) -> dict:
+    kb = {"keyboard": [[{"text": t} for t in row] for row in rows],
+          "resize_keyboard": True,
+          "one_time_keyboard": one_time}
+    if input_field_placeholder:
+        kb["input_field_placeholder"] = input_field_placeholder
+    return kb
+
+
+MAIN_KB = kb_reply([["Ротационное формование", "Полимерно-песчаное производство"]])
+FLOW_MENU_KB = kb_reply([["Новая запись"], ["Отменить последнюю запись"], ["Назад"]])
+CANCEL_KB = kb_reply([["Отмена"]])
+CONFIRM_KB = kb_reply([["Да, отменить"], ["Нет, оставить"]])
+
+# Numeric input keyboard (opens numeric keypad on phone; user types digits manually)
+NUMERIC_INPUT_KB = {
+    "keyboard": [
+        [{"text": "Отмена"}]
+    ],
+    "resize_keyboard": True,
+    "one_time_keyboard": False,
+    "input_field_placeholder": "Введите число"
+}
+
+# Product keyboards builder — reads first column of given sheet
+def build_product_kb(sheet_name: str, extra: Optional[List[str]] = None) -> dict:
+    if extra is None:
+        extra = []
     try:
-        send(int(target_uid), "В доступе отказано.")
-    except:
-        pass
-    return True
+        vals = sheet_client._ws(sheet_name).col_values(1)[1:]
+    except Exception:
+        vals = []
+    items = [v.strip() for v in vals if v and v.strip()] + extra
+    # split into two columns per row for nicer layout
+    rows = [items[i:i + 2] for i in range(0, len(items), 2)]
+    rows.append(["Отмена"])
+    return kb_reply(rows, one_time=False)
 
-def cancel_confirm_process(approver_uid, target_uid, message_id):
-    target = get_user(target_uid)
-    if not target or target["status"] != "ожидает":
-        edit_message(approver_uid, message_id, "Заявка уже обработана или не найдена.")
-        return False
 
-    fio = target["fio"]
-    approve_data = f"pre_approve_{target_uid}"
-    reject_data = f"reject_{target_uid}"
-    kb = {"inline_keyboard": [[{"text": "✅ Подтвердить и выбрать роль", "callback_data": approve_data},],
-                              [{"text": "❌ Отклонить", "callback_data": reject_data},]]}
-    
-    text = (f"Новая заявка на доступ:\nФИО: {fio}\nTelegramID: {target_uid}\n\n"
-            f"Выбор роли отменён. Нажмите кнопку для выбора роли или отклонения.")
-    edit_message(approver_uid, message_id, text, kb)
-    return True
-# ===================================================================================
-
-# ==================== Функции производственных потоков ====================
-
-def get_date_keyboard(flow):
-    """Клавиатура для выбора даты (Сегодня, Вчера, Другая дата)"""
-    today = now_msk().strftime("%Y-%m-%d")
-    yesterday = (now_msk() - timedelta(days=1)).strftime("%Y-%m-%d")
-    
-    return {
-        "inline_keyboard": [
-            [{"text": "Сегодня", "callback_data": f"prod_{flow}_date_{today}"}],
-            [{"text": "Вчера", "callback_data": f"prod_{flow}_date_{yesterday}"}],
-            [{"text": "Другая дата...", "callback_data": f"prod_{flow}_date_other"}],
-            [{"text": "Отмена", "callback_data": f"prod_{flow}_cancel"}]
-        ]
-    }
-
-def get_shift_keyboard(flow):
-    """Клавиатура для выбора смены (День, Ночь)"""
-    return {
-        "inline_keyboard": [
-            [{"text": "День", "callback_data": f"prod_{flow}_shift_День"}],
-            [{"text": "Ночь", "callback_data": f"prod_{flow}_shift_Ночь"}],
-            [{"text": "Отмена", "callback_data": f"prod_{flow}_cancel"}]
-        ]
-    }
-
-def get_product_keyboard(flow):
-    """Клавиатура для выбора продукции"""
-    products = products_rf if flow == "rf" else products_ppi
-    
-    kb_rows = []
-    # Сортируем названия для удобства
-    sorted_names = sorted(products.keys()) 
-    
-    row = []
-    for name in sorted_names:
-        # data: prod_<flow>_product_<name>
-        row.append({"text": name, "callback_data": f"prod_{flow}_product_{name}"})
-        if len(row) == 2:
-            kb_rows.append(row)
-            row = []
-    if row:
-        kb_rows.append(row)
-        
-    kb_rows.append([{"text": "Отмена", "callback_data": f"prod_{flow}_cancel"}])
-    return {"inline_keyboard": kb_rows}
-
-def append_production_data(flow, data):
-    """Записывает данные в соответствующий лист Google Sheets"""
-    ws = ws_output_rf if flow == "rf" else ws_output_ppi
-    products = products_rf if flow == "rf" else products_ppi
-    
-    product_code = products.get(data['product'], data['product']) # Использовать код или название
-    
-    user_data = get_user(data['uid'])
-    user_fio = user_data.get('fio', str(data['uid']))
-    
+# Controllers list (cached)
+_CONTROLLERS_CACHE: Dict[str, Any] = {"rf": {"until": 0, "data": []}, "ppi": {"until": 0, "data": []}}
+def get_controllers_cached(sheet_name: str, ttl: int = 600) -> List[int]:
+    key = "rf" if sheet_name == CTRL_RF_SHEET else "ppi"
+    now_ts = time.time()
+    if _CONTROLLERS_CACHE[key]["until"] > now_ts and _CONTROLLERS_CACHE[key]["data"]:
+        return _CONTROLLERS_CACHE[key]["data"]
     try:
-        ws.append_row([
-            data['date'],
-            data['shift'],
-            product_code, # В таблице записываем код
-            data['quantity'],
-            user_fio,
-            now_msk().strftime("%Y-%m-%d %H:%M:%S"),
-            "Записано"
-        ], value_input_option="USER_ENTERED")
-        return True
-    except Exception as e:
-        log.exception(f"Error appending production data for flow {flow}: {e}")
-        return False
+        data = sheet_client.get_controllers(sheet_name)
+    except Exception:
+        data = []
+    _CONTROLLERS_CACHE[key]["data"] = data
+    _CONTROLLERS_CACHE[key]["until"] = now_ts + ttl
+    return data
 
 
-# ==================== Обработка шагов производственного потока ====================
+# ========== AuthManager ==========
+class AuthManager:
+    def __init__(self, sc: SheetClient):
+        self.sc = sc
 
-def start_production_flow(uid, flow, chat_id, message_id=None):
-    """Начало или перезапуск потока"""
-    states[uid] = {"chat": chat_id, "flow": flow, "step": "date", "data": {"uid": uid}}
-    
-    flow_name = "Ротационное формование" if flow == "rf" else "Полимерно-песчаное производство"
-    msg = f"Вы выбрали: **{flow_name}**.\n\nВыберите дату производства:"
-    kb = get_date_keyboard(flow)
-    
-    if message_id:
-        edit_message(chat_id, message_id, msg, kb)
-    else:
-        send(chat_id, msg, kb)
-        
-def process_date_selection(uid, flow, value, chat_id, message_id):
-    """Обработка выбора даты"""
-    state = states[uid]
-    state['data']['date'] = value
-    
-    if value == 'other':
-        # Переход к текстовому вводу даты
-        state['step'] = 'date_input'
-        msg = "Введите дату в формате **ГГГГ-ММ-ДД** (например, 2025-12-09):"
-        edit_message(chat_id, message_id, msg) # Удаляем inline кнопки
-        send(chat_id, msg, CANCEL_KB) # Добавляем Отмена
-    else:
-        # Переход к выбору смены
-        state['step'] = 'shift'
-        msg = f"Дата: **{value}**.\n\nВыберите смену:"
-        kb = get_shift_keyboard(flow)
-        edit_message(chat_id, message_id, msg, kb)
+    def get_user(self, uid: int) -> Optional[Dict[str, str]]:
+        return self.sc.find_user(uid)
 
-def process_shift_selection(uid, flow, value, chat_id, message_id):
-    """Обработка выбора смены"""
-    state = states[uid]
-    state['data']['shift'] = value
-    
-    # Переход к выбору продукции
-    state['step'] = 'product'
-    msg = f"Дата: {state['data']['date']}, Смена: **{value}**.\n\nВыберите продукцию:"
-    kb = get_product_keyboard(flow)
-    edit_message(chat_id, message_id, msg, kb)
+    def register_user(self, uid: int, fio: str, requested_by: str = ""):
+        self.sc.add_user(uid, fio, requested_by)
+        self.notify_approvers_new_user(uid, fio)
 
-def process_product_selection(uid, flow, value, chat_id, message_id):
-    """Обработка выбора продукции"""
-    state = states[uid]
-    state['data']['product'] = value
-    
-    # Переход к вводу количества
-    state['step'] = 'quantity_input'
-    msg = (f"Дата: {state['data']['date']}, Смена: {state['data']['shift']}.\n"
-           f"Продукция: **{value}**.\n\n"
-           f"Введите количество (только целое число):")
-    edit_message(chat_id, message_id, msg) # Удаляем inline кнопки
-    send(chat_id, msg, CANCEL_KB) # Добавляем Отмена
-    
-def display_buffered_data(uid, chat_id, message_id):
-    """Отображает буферизированные данные и кнопки записи/отмены"""
-    state = states[uid]
-    flow = state['flow']
-    data = state['data']
-    
-    # После ввода количества, переходим в состояние 'confirm'
-    state['step'] = 'confirm'
-    
-    flow_name = "Ротационное формование" if flow == "rf" else "Полимерно-песчаное производство"
-    
-    msg = (f"**ПРОВЕРКА ДАННЫХ ({flow_name}):**\n"
-           f"**Дата:** {data.get('date')}\n"
-           f"**Смена:** {data.get('shift')}\n"
-           f"**Продукция:** {data.get('product')}\n"
-           f"**Количество:** {data.get('quantity')}\n\n"
-           f"Нажмите 'Записать данные' для сохранения или 'Отмена записи' для сброса.")
-           
-    kb = {
-        "inline_keyboard": [
-            [{"text": "✅ Записать данные", "callback_data": f"prod_{flow}_write"}],
-            [{"text": "❌ Отмена записи", "callback_data": f"prod_{flow}_cancel"}]
-        ]
-    }
-    
-    # Редактируем последнее сообщение, если есть, или отправляем новое
-    if message_id:
-        edit_message(chat_id, message_id, msg, kb)
-    else:
-        send(chat_id, msg, kb)
-    
-def process_write_data(uid, flow, chat_id, message_id):
-    """Финальная запись данных и завершение потока"""
-    state = states[uid]
-    data = state['data']
-    
-    if append_production_data(flow, data):
-        msg = f"✅ **Данные по выпуску {flow.upper()} записаны успешно!**"
-    else:
-        msg = f"❌ **Ошибка записи данных {flow.upper()}!** Попробуйте снова или обратитесь к администратору."
-        
-    edit_message(chat_id, message_id, msg)
-    states.pop(uid, None)
-    send(chat_id, "Выберите следующее действие:", MAIN_KB)
+    def notify_approvers_new_user(self, uid: int, fio: str):
+        approvers = self.sc.get_approvers()
+        if not approvers:
+            log.info("No approvers to notify for new user %s", uid)
+            return
+        kb = {
+            "inline_keyboard": [
+                [
+                    {"text": "Подтвердить", "callback_data": f"approve_{uid}"},
+                    {"text": "Отклонить", "callback_data": f"reject_{uid}"}
+                ]
+            ]
+        }
+        text = f"<b>Новая заявка на доступ</b>\nФИО: {fio}\nID: <code>{uid}</code>"
+        for a in approvers:
+            try:
+                requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                              json={"chat_id": a, "text": text, "parse_mode": "HTML", "reply_markup": json.dumps(kb, ensure_ascii=False)},
+                              timeout=10)
+            except Exception:
+                log.exception("notify approver failed for %s", a)
 
-# ==================== Главный обработчик сообщений ====================
-
-def process_message(uid, chat, text):
-    last_activity[uid] = time.time()
-    
-    if uid not in states:
-        states[uid] = {"chat": chat}
-
-    state = states[uid]
-    u = get_user(uid)
-    
-    # 1. Логика авторизации
-    if u is None:
-        if state.get("fio_wait"):
-            fio = text.strip()
-            if not fio or fio == "Отмена":
-                send(chat, "Операция отменена. Для регистрации введите /start", MAIN_KB)
-                states.pop(uid, None)
+    def process_callback(self, callback: dict):
+        data = callback.get("data", "")
+        uid = callback["from"]["id"]
+        chat_id = callback["message"]["chat"]["id"]
+        if data.startswith("approve_") or data.startswith("reject_"):
+            target_id = int(data.split("_", 1)[1])
+            approver = self.get_user(uid)
+            if not approver or approver["status"] != "подтвержден" or approver["role"] not in ("admin", "master"):
+                tg_send(chat_id, "У вас нет прав подтверждать/отклонять.")
                 return
-            add_user(uid, fio)
-            notify_approvers_new_user(uid, fio)
-            send(chat, "Спасибо! Ваша заявка отправлена на подтверждение.")
-            states.pop(uid, None)
-            return
-        else:
-            states[uid]["fio_wait"] = True
-            send(chat, "Вы не зарегистрированы. Введите ваше ФИО:", CANCEL_KB)
-            return
-    
-    if u["status"] != "подтвержден":
-        send(chat, "Ваш доступ пока не подтверждён администратором.")
-        return
-
-    # 2. Обработка команд /start и Отмена
-    if text == "/start":
-        states.pop(uid, None)
-        send(chat, "Добро пожаловать. Выберите действие:", MAIN_KB)
-        return
-        
-    if text == "Отмена":
-        if state.get('flow'):
-             send(chat, f"Запись данных {state['flow'].upper()} отменена.", MAIN_KB)
-        else:
-             send(chat, "Отменено.", MAIN_KB)
-        states.pop(uid, None)
-        return
-        
-    # 3. Обработка выбора производственного потока (только если не в процессе)
-    if text == "Ротационное формование":
-        start_production_flow(uid, "rf", chat)
-        return
-        
-    if text == "Полимерно-песчаное производство":
-        start_production_flow(uid, "ppi", chat)
-        return
-
-    # 4. Обработка текстового ввода (Дата или Количество)
-    if state.get('flow') and state.get('step') in ('date_input', 'quantity_input'):
-        flow = state['flow']
-        
-        # Ввод даты
-        if state['step'] == 'date_input':
-            try:
-                # Простая проверка формата
-                datetime.strptime(text, "%Y-%m-%d") 
-                process_date_selection(uid, flow, text, chat, None)
-            except ValueError:
-                send(chat, "Неверный формат даты. Пожалуйста, введите в формате **ГГГГ-ММ-ДД**:", CANCEL_KB)
-            return
-            
-        # Ввод количества
-        if state['step'] == 'quantity_input':
-            try:
-                quantity = int(text)
-                if quantity <= 0:
-                    raise ValueError
-                state['data']['quantity'] = quantity
-                display_buffered_data(uid, chat, None)
-            except ValueError:
-                send(chat, "Неверное количество. Введите **целое положительное число**:", CANCEL_KB)
-            return
-
-    # 5. Если подтвержден, но ввел не команду и не текст, нужный для шага
-    send(chat, "Выберите действие:", MAIN_KB)
-
-
-# ==================== Главный обработчик Inline-кнопок ====================
-
-def process_callback_query(callback_query):
-    uid = callback_query["from"]["id"]
-    data = callback_query["data"]
-    message = callback_query["message"]
-    chat_id = message["chat"]["id"]
-    message_id = message["message_id"]
-
-    answer_callback(callback_query["id"])
-
-    # 1. Логика авторизации
-    if data.startswith(("pre_approve_", "reject_", "confirm_", "cancel_confirm_")):
-        if data.startswith("pre_approve_"):
-            target_uid = data.split("_")[-1]
-            pre_approve_process(uid, target_uid, message_id)
-        elif data.startswith("reject_"):
-            target_uid = data.split("_")[-1]
-            reject_process(uid, target_uid, message_id)
-        elif data.startswith("confirm_"):
+            target = self.get_user(target_id)
+            if not target:
+                tg_send(chat_id, "Целевой пользователь не найден.")
+                return
+            if data.startswith("approve_"):
+                roles = ["operator", "master"]
+                if approver["role"] == "admin":
+                    roles.append("admin")
+                kb = {"inline_keyboard": [[{"text": r, "callback_data": f"setrole_{target_id}_{r}"}] for r in roles]}
+                tg_send(chat_id, f"Выберите роль для <b>{target['fio']}</b>:", kb)
+            else:
+                self.sc.update_user(target_id, status="отклонен", confirmed_by=uid)
+                tg_send(chat_id, f"Заявка отклонена: {target['fio']}")
+                try:
+                    tg_send(int(target_id), "В доступе отказано.")
+                except Exception:
+                    pass
+        elif data.startswith("setrole_"):
             parts = data.split("_")
-            target_uid = parts[1]
-            new_role = parts[2]
-            confirm_process(uid, target_uid, new_role, message_id)
-        elif data.startswith("cancel_confirm_"):
-            target_uid = data.split("_")[-1]
-            cancel_confirm_process(uid, target_uid, message_id)
-        return
+            if len(parts) < 3:
+                return
+            target_id = int(parts[1])
+            role = parts[2]
+            approver = self.get_user(uid)
+            if not approver or approver["status"] != "подтвержден":
+                tg_send(chat_id, "Ваш аккаунт не подтверждён.")
+                return
+            if approver["role"] == "master" and role == "admin":
+                tg_send(chat_id, "Мастер не может назначать роль admin.")
+                return
+            self.sc.update_user(target_id, role=role, status="подтвержден", confirmed_by=uid)
+            target = self.get_user(target_id)
+            tg_send(chat_id, f"Пользователь {target['fio']} подтверждён как <b>{role}</b>")
+            try:
+                tg_send(int(target_id), f"Ваша заявка подтверждена! Ваша роль: {role}\n\nВыберите действие:", MAIN_KB)
+            except Exception:
+                pass
 
-    # 2. Логика производственных потоков
-    if data.startswith("prod_"):
-        try:
-            # prod_<flow>_<step>_<value>
-            parts = data.split("_", 3)
-            flow = parts[1]
-            step = parts[2]
-            value = parts[3] if len(parts) > 3 else None
-        except IndexError:
-            edit_message(chat_id, message_id, "Ошибка: неверный формат данных.")
+
+auth = AuthManager(sheet_client)
+
+# ========== FSM: управление состояниями и диалогами ==========
+class FSM:
+    def __init__(self, sc: SheetClient, authm: AuthManager):
+        self.sc = sc
+        self.auth = authm
+        self.states: Dict[int, dict] = {}
+        self.last_activity: Dict[int, float] = {}
+        self.TIMEOUT = 600
+        threading.Thread(target=self._timeout_worker, daemon=True).start()
+
+    def _timeout_worker(self):
+        while True:
+            time.sleep(30)
+            now_ts = time.time()
+            for uid in list(self.states.keys()):
+                if now_ts - self.last_activity.get(uid, now_ts) > self.TIMEOUT:
+                    st = self.states.pop(uid, None)
+                    if st:
+                        try:
+                            tg_send(st.get("chat"), "Диалог прерван — неактивность 10 минут.")
+                        except Exception:
+                            pass
+                    self.last_activity.pop(uid, None)
+
+    def touch(self, uid: int):
+        self.last_activity[uid] = time.time()
+
+    def ensure_state(self, uid: int, chat: int):
+        if uid not in self.states:
+            self.states[uid] = {"chat": chat, "cancel_used": False}
+        else:
+            self.states[uid]["chat"] = chat
+
+    def clear_state(self, uid: int):
+        self.states.pop(uid, None)
+        self.last_activity.pop(uid, None)
+
+    def handle_text(self, uid: int, chat: int, text: str, user_repr: str):
+        self.touch(uid)
+        self.ensure_state(uid, chat)
+        st = self.states[uid]
+
+        # navigation & cancel
+        if text == "Назад":
+            self.clear_state(uid)
+            tg_send(chat, "Главное меню:", MAIN_KB)
+            return
+        if text == "Отмена":
+            st.pop("pending_cancel", None)
+            self.clear_state(uid)
+            tg_send(chat, "Отменено.", MAIN_KB)
             return
 
-        state = states.get(uid)
-        if not state or state.get('flow') != flow:
-            send(chat_id, "Сессия устарела. Начните снова.", MAIN_KB)
+        # auth
+        user = self.auth.get_user(uid)
+        if user is None:
+            if st.get("waiting_fio"):
+                fio = text.strip()
+                if not fio:
+                    tg_send(chat, "Введите корректное ФИО:")
+                    return
+                self.auth.register_user(uid, fio, requested_by="")
+                tg_send(chat, "Спасибо! Ваша заявка отправлена на подтверждение.")
+                self.clear_state(uid)
+                return
+            st["waiting_fio"] = True
+            tg_send(chat, "Вы не зарегистрированы. Введите ваше ФИО:")
             return
 
-        if step == 'cancel':
-            edit_message(chat_id, message_id, f"❌ Запись данных {flow.upper()} отменена.", None)
-            states.pop(uid, None)
-            send(chat_id, "Выберите следующее действие:", MAIN_KB)
+        if user["status"] != "подтвержден":
+            tg_send(chat, "Ваш доступ пока не подтверждён администратором.")
             return
 
-        if step == 'date':
-            process_date_selection(uid, flow, value, chat_id, message_id)
-        elif step == 'shift':
-            process_shift_selection(uid, flow, value, chat_id, message_id)
-        elif step == 'product':
-            process_product_selection(uid, flow, value, chat_id, message_id)
-        elif step == 'write' and state.get('step') == 'confirm':
-            process_write_data(uid, flow, chat_id, message_id)
-        return
+        # flow selection
+        if "flow" not in st:
+            if text in ("/start", "Ротационное формование"):
+                st["flow"] = "rf"
+                tg_send(chat, "<b>Ротационное формование</b>\nВыберите действие:", FLOW_MENU_KB)
+                return
+            if text == "Полимерно-песчаное производство":
+                st["flow"] = "ppi"
+                tg_send(chat, "<b>Полимерно-песчаное производство</b>\nВыберите действие:", FLOW_MENU_KB)
+                return
+            tg_send(chat, f"Привет, {user['fio'].split()[0]}! Выберите действие:", MAIN_KB)
+            return
+
+        flow = st["flow"]
+
+        # cancel last record
+        if text == "Отменить последнюю запись":
+            if st.get("cancel_used", False):
+                tg_send(chat, "Вы уже отменили одну запись в этом сеансе. Сделайте новую запись, чтобы снова отменить.", FLOW_MENU_KB)
+                return
+
+            sheet = RF_SHEET if flow == "rf" else PPI_SHEET
+            row, rownum = self.sc.find_last_active_record(sheet, uid)
+            if not row:
+                tg_send(chat, "У вас нет активных записей для отмены.", FLOW_MENU_KB)
+                return
+
+            st["pending_cancel"] = {"ws": sheet, "row": row, "rownum": rownum}
+            # build short preview
+            date = row[0] if len(row) > 0 else ""
+            shift = row[1] if len(row) > 1 else ""
+            product = row[2] if len(row) > 2 else ""
+            qty = row[3] if len(row) > 3 else ""
+            msg = (
+                f"Вы уверены, что хотите отменить эту запись?\n\n"
+                f"Дата: {date}\n"
+                f"Смена: {shift}\n"
+                f"Продукция: {product}\n"
+                f"Количество: {qty}\n"
+            )
+            tg_send(chat, msg, CONFIRM_KB)
+            return
+
+        # confirm cancel
+        if "pending_cancel" in st:
+            if text == "Да, отменить":
+                pend = st["pending_cancel"]
+                ws_title = pend["ws"]
+                row = pend["row"]
+                rownum = pend["rownum"]
+                # status column is G -> column 7 -> letter "G"
+                try:
+                    self.sc.update_cell(ws_title, f"G{rownum}", "ОТМЕНЕНО")
+                except Exception:
+                    log.exception("Failed to mark canceled")
+                # user message
+                date = row[0] if len(row) > 0 else ""
+                shift = row[1] if len(row) > 1 else ""
+                product = row[2] if len(row) > 2 else ""
+                qty = row[3] if len(row) > 3 else ""
+                user_msg = (
+                    f"❌ <b>Запись отменена</b>\n\n"
+                    f"Дата: {date}\n"
+                    f"Смена: {shift}\n"
+                    f"Продукция: {product}\n"
+                    f"Количество: {qty}\n"
+                    f"\nОтменил: {user['fio']}"
+                )
+                tg_send(chat, user_msg, FLOW_MENU_KB)
+                # notify controllers
+                ctrl_sheet = CTRL_RF_SHEET if ws_title == RF_SHEET else CTRL_PPI_SHEET
+                ctrl_msg = (
+                    f"⚠️ <b>ОТМЕНЕНА ЗАПИСЬ</b>\n\n"
+                    f"Лист: {ws_title}\n"
+                    f"Дата: {date}\n"
+                    f"Смена: {shift}\n"
+                    f"Продукция: {product}\n"
+                    f"Количество: {qty}\n"
+                    f"\nОтменил: {user['fio']}"
+                )
+                for cid in get_controllers_cached(ctrl_sheet):
+                    try:
+                        tg_send(cid, ctrl_msg)
+                    except Exception:
+                        pass
+                st["cancel_used"] = True
+                st.pop("pending_cancel", None)
+                return
+
+            if text == "Нет, оставить":
+                tg_send(chat, "Запись сохранена.", FLOW_MENU_KB)
+                st.pop("pending_cancel", None)
+                return
+
+        # new record
+        if text == "Новая запись":
+            st["cancel_used"] = False
+            # show recent records
+            sheet = RF_SHEET if flow == "rf" else PPI_SHEET
+            recent = self.sc.get_last_records(sheet, 5)
+            msg = f"<b>Последние записи ({sheet}):</b>\n\n"
+            if recent:
+                # show up to 5
+                lines = []
+                for r in recent[-5:]:
+                    date = r[0] if len(r) > 0 else ""
+                    shift = r[1] if len(r) > 1 else ""
+                    prod = r[2] if len(r) > 2 else ""
+                    qty = r[3] if len(r) > 3 else ""
+                    lines.append(f"• {date} | {shift} | {prod} | {qty}")
+                msg += "\n".join(lines)
+            else:
+                msg += "Нет записей."
+            tg_send(chat, msg)
+            # start steps: date -> shift -> product -> quantity
+            st.update({"step": "date", "data": {}})
+            today = now_msk().strftime("%d.%m.%Y")
+            yest = (now_msk() - timedelta(days=1)).strftime("%d.%m.%Y")
+            tg_send(chat, "Дата:", kb_reply([[today, yest], ["Другая дата", "Отмена"]]))
+            return
+
+        # step handling
+        step = st.get("step")
+        data = st.get("data", {})
+
+        if not step:
+            tg_send(chat, "Выберите действие:", FLOW_MENU_KB)
+            return
+
+        # date step
+        if step == "date":
+            if text == "Другая дата":
+                st["step"] = "date_custom"
+                tg_send(chat, "Введите дату (дд.мм.гггг):", CANCEL_KB)
+                return
+            try:
+                datetime.strptime(text, "%d.%m.%Y")
+                data["date"] = text
+            except Exception:
+                tg_send(chat, "Неверный формат даты.", CANCEL_KB)
+                return
+            st["step"] = "shift"
+            tg_send(chat, "Выберите смену:", kb_reply([["День", "Ночь"], ["Отмена"]]))
+            return
+
+        if step == "date_custom":
+            try:
+                datetime.strptime(text, "%d.%m.%Y")
+                data["date"] = text
+                st["step"] = "shift"
+                tg_send(chat, "Выберите смену:", kb_reply([["День", "Ночь"], ["Отмена"]]))
+            except Exception:
+                tg_send(chat, "Введите дату в формате дд.мм.гггг", CANCEL_KB)
+            return
+
+        # shift step
+        if step == "shift":
+            if text not in ("День", "Ночь"):
+                tg_send(chat, "Выберите смену:", kb_reply([["День", "Ночь"], ["Отмена"]]))
+                return
+            data["shift"] = text
+            # ask product from appropriate sheet
+            prod_sheet = RF_SHEET if flow == "rf" else PPI_SHEET
+            prod_list_sheet = "Продукция РФ" if flow == "rf" else "Продукция ППИ"
+            # build keyboard from the product list sheet (first column)
+            prod_kb = build_product_kb(prod_list_sheet, extra=["Другая продукция"])
+            st["step"] = "product"
+            st["data"] = data
+            tg_send(chat, "Выберите продукцию:", prod_kb)
+            return
+
+        # product step
+        if step == "product":
+            if text == "Другая продукция":
+                st["step"] = "product_custom"
+                tg_send(chat, "Введите название продукции:", CANCEL_KB)
+                return
+            data["product"] = text
+            st["step"] = "quantity"
+            tg_send(chat, "Введите количество (число):", NUMERIC_INPUT_KB)
+            return
+
+        if step == "product_custom":
+            if not text or text == "Отмена":
+                tg_send(chat, "Неверное название продукции.", CANCEL_KB)
+                return
+            data["product"] = text.strip()
+            st["step"] = "quantity"
+            tg_send(chat, "Введите количество (число):", NUMERIC_INPUT_KB)
+            return
+
+        # quantity step
+        if step == "quantity":
+            if not (text.replace(",", ".").replace(".", "", 1).isdigit()):
+                tg_send(chat, "Введите корректное число для количества.", NUMERIC_INPUT_KB)
+                return
+            # normalize decimal comma to dot, but store as is
+            qty = text.replace(",", ".")
+            data["quantity"] = qty
+            # finalize record
+            data["user"] = f"{user['fio']} ({uid})"
+            data["ts"] = now_msk_str()
+            # build row: Date | Shift | Product | Quantity | User | TS | Status
+            row = [data.get("date", ""), data.get("shift", ""), data.get("product", ""), data.get("quantity", ""),
+                   data.get("user", ""), data.get("ts", ""), ""]
+            target_sheet = RF_SHEET if flow == "rf" else PPI_SHEET
+            try:
+                self.sc.append_record(target_sheet, row)
+            except Exception:
+                log.exception("Failed to append record")
+            # confirmation message
+            confirm_text = (
+                f"✅ <b>Запись сохранена</b>\n\n"
+                f"Лист: {target_sheet}\n"
+                f"Дата: <b>{data.get('date','')}</b>\n"
+                f"Смена: <b>{data.get('shift','')}</b>\n"
+                f"Продукция: <b>{data.get('product','')}</b>\n"
+                f"Количество: <b>{data.get('quantity','')}</b>\n\n"
+                f"Добавил: {user['fio']}"
+            )
+            tg_send(chat, confirm_text, MAIN_KB)
+            # notify controllers
+            ctrl_sheet = CTRL_RF_SHEET if target_sheet == RF_SHEET else CTRL_PPI_SHEET
+            notify_msg = (
+                f"⚠️ <b>НОВАЯ ЗАПИСЬ — {target_sheet}</b>\n\n"
+                f"Дата: {data.get('date','')}\n"
+                f"Смена: {data.get('shift','')}\n"
+                f"Продукция: {data.get('product','')}\n"
+                f"Количество: {data.get('quantity','')}\n"
+                f"Добавил: {user['fio']}"
+            )
+            for cid in get_controllers_cached(ctrl_sheet):
+                try:
+                    tg_send(cid, notify_msg)
+                except Exception:
+                    pass
+            # finalize state
+            self.clear_state(uid)
+            return
+
+        # fallback
+        tg_send(chat, "Выберите действие:", FLOW_MENU_KB)
 
 
-# ==================== Flask Webhook ====================
+# ========== Flask webhook & callbacks ==========
 app = Flask(__name__)
 LOCK_PATH = "/tmp/bot.lock"
 
-if os.getenv("RENDER"):
-    # (Webhook setup is skipped for brevity, assumed to be running environment)
-    pass
+# start controllers refresher thread that warms cache once per day
+def controllers_refresher_worker(interval_min: int = 1440):
+    while True:
+        try:
+            sheet_client.invalidate_cache(CTRL_RF_SHEET)
+            sheet_client.invalidate_cache(CTRL_PPI_SHEET)
+            _ = sheet_client.get_controllers(CTRL_RF_SHEET)
+            _ = sheet_client.get_controllers(CTRL_PPI_SHEET)
+            log.info("Controllers cache refreshed")
+        except Exception:
+            log.exception("Error refreshing controllers cache")
+        time.sleep(interval_min * 60)
+
+threading.Thread(target=controllers_refresher_worker, daemon=True).start()
+
+fsm = FSM(sheet_client, auth)
 
 @app.route("/", methods=["POST"])
 def webhook():
@@ -717,25 +726,38 @@ def webhook():
     if not update:
         return "ok", 200
 
+    # handle callback_query (inline buttons for approvals)
+    if "callback_query" in update:
+        try:
+            auth.process_callback(update["callback_query"])
+            # answer callback
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+                          json={"callback_query_id": update["callback_query"]["id"]})
+        except Exception:
+            log.exception("callback processing error")
+        return "ok", 200
+
+    if "message" not in update:
+        return "ok", 200
+
+    m = update["message"]
+    chat_id = m["chat"]["id"]
+    user_id = m["from"]["id"]
+    text = (m.get("text") or "").strip()
+    username = m["from"].get("username", "")
+    user_repr = f"{user_id} (@{username or 'no_user'})"
+
     with FileLock(LOCK_PATH):
         try:
-            if "message" in update:
-                m = update["message"]
-                user_id = m["from"]["id"]
-                chat_id = m["chat"]["id"]
-                text = (m.get("text") or "").strip()
-                process_message(user_id, chat_id, text)
-            
-            elif "callback_query" in update:
-                process_callback_query(update["callback_query"])
-        
-        except Exception as e:
-            log.exception("processing error: %s", e)
+            fsm.handle_text(user_id, chat_id, text, user_repr)
+        except Exception:
+            log.exception("Processing error")
     return "ok", 200
 
-@app.route("/")
-def index():
-    return "Bot is running!", 200
+@app.route("/health")
+def health():
+    return "ok", 200
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)

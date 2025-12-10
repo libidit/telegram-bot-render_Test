@@ -1,5 +1,5 @@
 # bot_webhook.py
-# Обновлённая версия под "Выпуск РФ" и "Выпуск ППИ"
+# Обновлённая версия под "Выпуск РФ" и "Выпуск ППИ" с мульти-циклом продукции
 import os
 import json
 import logging
@@ -431,6 +431,7 @@ class FSM:
             return
         if text == "Отмена":
             st.pop("pending_cancel", None)
+            # keep the state cleared
             self.clear_state(uid)
             tg_send(chat, "Отменено.", MAIN_KB)
             return
@@ -569,8 +570,10 @@ class FSM:
             else:
                 msg += "Нет записей."
             tg_send(chat, msg)
-            # start steps: date -> shift -> product -> quantity
+            # start steps: date -> shift -> product -> quantity multi-cycle
             st.update({"step": "date", "data": {}})
+            # ensure products_list cleared
+            st.pop("products_list", None)
             today = now_msk().strftime("%d.%m.%Y")
             yest = (now_msk() - timedelta(days=1)).strftime("%d.%m.%Y")
             tg_send(chat, "Дата:", kb_reply([[today, yest], ["Другая дата", "Отмена"]]))
@@ -617,82 +620,151 @@ class FSM:
                 return
             data["shift"] = text
             # ask product from appropriate sheet
-            prod_sheet = RF_SHEET if flow == "rf" else PPI_SHEET
             prod_list_sheet = "Продукция РФ" if flow == "rf" else "Продукция ППИ"
-            # build keyboard from the product list sheet (first column)
             prod_kb = build_product_kb(prod_list_sheet, extra=["Другая продукция"])
             st["step"] = "product"
             st["data"] = data
-            tg_send(chat, "Выберите продукцию:", prod_kb)
+            # initialize product list holder
+            st["products_list"] = []
+            tg_send(chat, "Выберите продукцию (или 'Другая продукция'):", prod_kb)
             return
 
-        # product step
+        # === MULTI-PRODUCT CYCLE ===
+
+        # select product
         if step == "product":
             if text == "Другая продукция":
                 st["step"] = "product_custom"
                 tg_send(chat, "Введите название продукции:", CANCEL_KB)
                 return
-            data["product"] = text
-            st["step"] = "quantity"
-            tg_send(chat, "Введите количество (число):", NUMERIC_INPUT_KB)
-            return
-
-        if step == "product_custom":
-            if not text or text == "Отмена":
-                tg_send(chat, "Неверное название продукции.", CANCEL_KB)
+            # user may press Отмена as keyboard button
+            if text == "Отмена":
+                tg_send(chat, "Отменено.", MAIN_KB)
+                self.clear_state(uid)
                 return
             data["product"] = text.strip()
             st["step"] = "quantity"
-            tg_send(chat, "Введите количество (число):", NUMERIC_INPUT_KB)
+            tg_send(chat, "Введите количество:", NUMERIC_INPUT_KB)
             return
 
-        # quantity step
-        if step == "quantity":
-            if not (text.replace(",", ".").replace(".", "", 1).isdigit()):
-                tg_send(chat, "Введите корректное число для количества.", NUMERIC_INPUT_KB)
+        if step == "product_custom":
+            if text == "Отмена" or not text.strip():
+                tg_send(chat, "Введите корректное название.", CANCEL_KB)
                 return
-            # normalize decimal comma to dot, but store as is
+            data["product"] = text.strip()
+            st["step"] = "quantity"
+            tg_send(chat, "Введите количество:", NUMERIC_INPUT_KB)
+            return
+
+        # quantity
+        if step == "quantity":
+            if text == "Отмена":
+                tg_send(chat, "Отменено.", MAIN_KB)
+                self.clear_state(uid)
+                return
+            if not (text.replace(",", ".").replace(".", "", 1).isdigit()):
+                tg_send(chat, "Введите корректное число.", NUMERIC_INPUT_KB)
+                return
+
             qty = text.replace(",", ".")
-            data["quantity"] = qty
-            # finalize record
-            data["user"] = f"{user['fio']} ({uid})"
-            data["ts"] = now_msk_str()
-            # build row: Date | Shift | Product | Quantity | User | TS | Status
-            row = [data.get("date", ""), data.get("shift", ""), data.get("product", ""), data.get("quantity", ""),
-                   data.get("user", ""), data.get("ts", ""), ""]
-            target_sheet = RF_SHEET if flow == "rf" else PPI_SHEET
-            try:
-                self.sc.append_record(target_sheet, row)
-            except Exception:
-                log.exception("Failed to append record")
-            # confirmation message
-            confirm_text = (
-                f"✅ <b>Запись сохранена</b>\n\n"
-                f"{target_sheet}\n"
-                f"Дата: <b>{data.get('date','')}</b>\n"
-                f"Смена: <b>{data.get('shift','')}</b>\n"
-                f"Продукция: <b>{data.get('product','')}</b>\n"
-                f"Количество: <b>{data.get('quantity','')}</b>\n\n"
-                f"Добавил: {user['fio']}"
-            )
-            tg_send(chat, confirm_text, MAIN_KB)
-            # notify controllers
-            ctrl_sheet = CTRL_RF_SHEET if target_sheet == RF_SHEET else CTRL_PPI_SHEET
-            notify_msg = (
-                f"⚠️ <b>НОВАЯ ЗАПИСЬ — {target_sheet}</b>\n\n"
-                f"Дата: {data.get('date','')}\n"
-                f"Смена: {data.get('shift','')}\n"
-                f"Продукция: {data.get('product','')}\n"
-                f"Количество: {data.get('quantity','')}\n"
-                f"Добавил: {user['fio']}"
-            )
-            for cid in get_controllers_cached(ctrl_sheet):
-                try:
-                    tg_send(cid, notify_msg)
-                except Exception:
-                    pass
-            # finalize state
-            self.clear_state(uid)
+            product_name = data.get("product", "")
+
+            # ensure products_list exists
+            if "products_list" not in st:
+                st["products_list"] = []
+
+            st["products_list"].append({
+                "product": product_name,
+                "quantity": qty
+            })
+
+            # reset product field for next iteration
+            data.pop("product", None)
+
+            # Ask whether to continue cycle
+            st["step"] = "add_more"
+            tg_send(chat,
+                    f"Добавлено:\n<b>{product_name}</b> — {qty}\n\nДобавить ещё продукцию?",
+                    kb_reply([["Да"], ["Завершить"], ["Отмена"]]))
+            return
+
+        # add_more step
+        if step == "add_more":
+            if text == "Да":
+                # go back to product selection
+                prod_list_sheet = "Продукция РФ" if flow == "rf" else "Продукция ППИ"
+                prod_kb = build_product_kb(prod_list_sheet, extra=["Другая продукция"])
+                st["step"] = "product"
+                tg_send(chat, "Выберите продукцию:", prod_kb)
+                return
+
+            if text == "Завершить":
+                # Now write ALL items into the sheet
+                target_sheet = RF_SHEET if flow == "rf" else PPI_SHEET
+                plist = st.get("products_list", [])
+
+                if not plist:
+                    tg_send(chat, "Нет добавленных позиций.", MAIN_KB)
+                    self.clear_state(uid)
+                    return
+
+                # Common fields
+                user_field = f"{user['fio']} ({uid})"
+                ts = now_msk_str()
+
+                for item in plist:
+                    row = [
+                        data.get("date", ""),
+                        data.get("shift", ""),
+                        item.get("product", ""),
+                        item.get("quantity", ""),
+                        user_field,
+                        ts,
+                        ""
+                    ]
+                    try:
+                        self.sc.append_record(target_sheet, row)
+                    except Exception:
+                        log.exception("append multiple failed")
+
+                # confirmation
+                msg = "✅ <b>Запись сохранена</b>\n\n"
+                msg += f"{target_sheet}\n"
+                msg += f"Дата: <b>{data.get('date','')}</b>\n"
+                msg += f"Смена: <b>{data.get('shift','')}</b>\n\n"
+                msg += "<b>Позиции:</b>\n"
+                for item in plist:
+                    msg += f"• {item['product']} — {item['quantity']}\n"
+
+                tg_send(chat, msg, MAIN_KB)
+
+                # notify controllers
+                ctrl_sheet = CTRL_RF_SHEET if target_sheet == RF_SHEET else CTRL_PPI_SHEET
+                notify = (
+                    f"⚠️ <b>НОВАЯ ЗАПИСЬ ({target_sheet})</b>\n"
+                    f"Дата: {data.get('date','')}\n"
+                    f"Смена: {data.get('shift','')}\n"
+                    f"Добавил: {user['fio']}\n\n"
+                    "Позиции:\n"
+                    + "\n".join([f"• {i['product']} — {i['quantity']}" for i in plist])
+                )
+
+                for cid in get_controllers_cached(ctrl_sheet):
+                    try:
+                        tg_send(cid, notify)
+                    except Exception:
+                        pass
+
+                self.clear_state(uid)
+                return
+
+            # support user pressing Отмена or wrong input
+            if text == "Отмена":
+                tg_send(chat, "Отменено.", MAIN_KB)
+                self.clear_state(uid)
+                return
+
+            tg_send(chat, "Нажмите Да или Завершить.", kb_reply([["Да"], ["Завершить"], ["Отмена"]]))
             return
 
         # fallback

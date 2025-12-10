@@ -551,7 +551,7 @@ class FSM:
                 shift = first_row[1] if first_row and len(first_row) > 1 else ""
                 ts = first_row[5] if first_row and len(first_row) > 5 else ""
                 user_msg = (
-                    f"❌ <b>Сессия отменена</b>\n\n"
+                    f"❌ <b>Запись отменена</b>\n\n"
                     f"Дата: {date}\n"
                     f"Смена: {shift}\n"
                     f"Время отправки: {ts}\n"
@@ -563,7 +563,7 @@ class FSM:
                 # уведомим контролёров с деталями
                 ctrl_sheet = CTRL_RF_SHEET if ws_title == RF_SHEET else CTRL_PPI_SHEET
                 ctrl_msg = (
-                    f"⚠️ <b>ОТМЕНЕНА СЕССИЯ</b>\n\n"
+                    f"⚠️ <b>ОТМЕНЕНА ЗАПИСИ</b>\n\n"
                     f"Лист: {ws_title}\n"
                     f"Дата: {date}\n"
                     f"Смена: {shift}\n"
@@ -729,12 +729,12 @@ class FSM:
             st["step"] = "add_more"
             tg_send(chat,
                     f"Добавлено:\n<b>{product_name}</b> — {qty}\n\nДобавить ещё продукцию?",
-                    kb_reply([["Да"], ["Завершить"], ["Отмена"]]))
+                    kb_reply([["Да, добавить"], ["Нет, завершить"], ["Отмена"]]))
             return
 
         # add_more step
         if step == "add_more":
-            if text == "Да":
+            if text == "Да, добавить":
                 # go back to product selection
                 prod_list_sheet = "Продукция РФ" if flow == "rf" else "Продукция ППИ"
                 prod_kb = build_product_kb(prod_list_sheet, extra=["Другая продукция"])
@@ -742,7 +742,7 @@ class FSM:
                 tg_send(chat, "Выберите продукцию:", prod_kb)
                 return
 
-            if text == "Завершить":
+            if text == "Нет, завершить":
                 # Now write ALL items into the sheet
                 target_sheet = RF_SHEET if flow == "rf" else PPI_SHEET
                 plist = st.get("products_list", [])

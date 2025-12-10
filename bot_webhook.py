@@ -199,10 +199,26 @@ class SheetClient:
             log.exception("append_record error: %s", e)
 
     def get_last_records(self, sheet_title: str, n: int = 5) -> List[List[str]]:
+        """
+        Возвращает последние n АКТИВНЫХ записей (без ОТМЕНЕНО).
+        Формат: [Дата, Смена, Продукция, Количество, Пользователь, Время, Статус]
+        """
         vals = self._get_all_values_cached(sheet_title)
         if len(vals) <= 1:
             return []
-        return vals[-n:]
+
+        status_idx = 6  # Статус
+
+        active = []
+        # перебираем строки с конца вверх
+        for row in reversed(vals[1:]):
+            if len(row) > status_idx and row[status_idx].strip().upper() == "ОТМЕНЕНО":
+                continue
+            active.append(row)
+            if len(active) >= n:
+                break
+
+        return active
 
     def update_cell(self, sheet_title: str, cell: str, value: Any):
         try:

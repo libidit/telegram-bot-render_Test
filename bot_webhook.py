@@ -211,18 +211,22 @@ class SheetClient:
         except Exception as e:
             log.exception("update_cell error: %s", e)
 
-    def find_last_active_record(self, sheet_title: str, uid: int) -> Tuple[Optional[List[str]], Optional[int]]:
+    def find_last_session_records(self, sheet_title: str, uid: int) -> List[Tuple[List[str], int]]:
         """
-        Find last record for user (user ID appears as "(<id>)" in Пользователь column).
-        New production sheets format:
-        0: Дата, 1: Смена, 2: Продукция, 3: Количество, 4: Пользователь, 5: Время отправки, 6: Статус
-        Returns (row, row_number) or (None, None).
+        Находит последнюю активную сессию пользователя в листе по TS (Время отправки).
+        Возвращает список кортежей (row, row_number) для всех строк, относящихся к этой сессии,
+        где пользователь встречается как "(<uid>)" в столбце Пользователь и статус != "ОТМЕНЕНО".
+        Формат листа: 0:Дата,1:Смена,2:Продукция,3:Количество,4:Пользователь,5:Время отправки,6:Статус
         """
         vals = self._get_all_values_cached(sheet_title)
         if not vals or len(vals) <= 1:
-            return None, None
-        user_idx = 4  # 0-based index
+            return []
+        user_idx = 4
+        ts_idx = 5
         status_idx = 6
+
+        # найдем индекс последней строки, принадлежащей пользователю и не отмененной
+        last_row_index = None
         for i in range(len(vals) - 1, 0, -1):
             row = vals[i]
             if len(row) <= user_idx:
@@ -234,8 +238,34 @@ class SheetClient:
             if f"({uid})" in cell_user:
                 status = row[status_idx] if len(row) > status_idx else ""
                 if status.strip() != "ОТМЕНЕНО":
-                    return row, i + 1
-        return None, None
+                    last_row_index = i
+                    break
+
+        if last_row_index is None:
+            return []
+
+        # получить TS у этой строки
+        last_row = vals[last_row_index]
+        ts_value = last_row[ts_idx] if len(last_row) > ts_idx else None
+        if not ts_value:
+            # если TS нет, вернём только ту последнюю строку
+            return [(last_row, last_row_index + 1)]
+
+        # собрать все строки с тем же TS и тем же пользователем (и не отменённые)
+        res: List[Tuple[List[str], int]] = []
+        for i in range(1, len(vals)):  # пропускаем заголовок
+            row = vals[i]
+            if len(row) <= max(user_idx, ts_idx):
+                continue
+            try:
+                if f"({uid})" in row[user_idx] and row[ts_idx] == ts_value:
+                    status = row[status_idx] if len(row) > status_idx else ""
+                    if status.strip() != "ОТМЕНЕНО":
+                        res.append((row, i + 1))
+            except Exception:
+                continue
+        return res
+
 
 
 # instantiate
@@ -478,72 +508,86 @@ class FSM:
                 return
 
             sheet = RF_SHEET if flow == "rf" else PPI_SHEET
-            row, rownum = self.sc.find_last_active_record(sheet, uid)
-            if not row:
+            session_rows = self.sc.find_last_session_records(sheet, uid)
+            if not session_rows:
                 tg_send(chat, "У вас нет активных записей для отмены.", FLOW_MENU_KB)
                 return
 
-            st["pending_cancel"] = {"ws": sheet, "row": row, "rownum": rownum}
-            # build short preview
-            date = row[0] if len(row) > 0 else ""
-            shift = row[1] if len(row) > 1 else ""
-            product = row[2] if len(row) > 2 else ""
-            qty = row[3] if len(row) > 3 else ""
-            msg = (
-                f"Вы уверены, что хотите отменить эту запись?\n\n"
-                f"Дата: {date}\n"
-                f"Смена: {shift}\n"
-                f"Продукция: {product}\n"
-                f"Количество: {qty}\n"
-            )
+            # сохраняем все строки сессии в pending_cancel
+            st["pending_cancel"] = {"ws": sheet, "rows": session_rows}
+
+            # соберем превью сессии для подтверждения
+            first_row = session_rows[0][0]
+            date = first_row[0] if len(first_row) > 0 else ""
+            shift = first_row[1] if len(first_row) > 1 else ""
+            ts = first_row[5] if len(first_row) > 5 else ""
+            msg = f"Вы собираетесь отменить последнюю сессию (все строки) пользователя.\n\nДата: {date}\nСмена: {shift}\nВремя отправки: {ts}\n\nПозиций в сессии: {len(session_rows)}\n\nСписок:\n"
+            for r, _ in session_rows:
+                prod = r[2] if len(r) > 2 else ""
+                qty = r[3] if len(r) > 3 else ""
+                msg += f"• {prod} — {qty}\n"
+
             tg_send(chat, msg, CONFIRM_KB)
             return
+
 
         # confirm cancel
         if "pending_cancel" in st:
             if text == "Да, отменить":
                 pend = st["pending_cancel"]
                 ws_title = pend["ws"]
-                row = pend["row"]
-                rownum = pend["rownum"]
-                # status column is G -> column 7 -> letter "G"
-                try:
-                    self.sc.update_cell(ws_title, f"G{rownum}", "ОТМЕНЕНО")
-                except Exception:
-                    log.exception("Failed to mark canceled")
-                # user message
-                date = row[0] if len(row) > 0 else ""
-                shift = row[1] if len(row) > 1 else ""
-                product = row[2] if len(row) > 2 else ""
-                qty = row[3] if len(row) > 3 else ""
+                rows = pend["rows"]  # список (row, rownum)
+
+                # пометим каждую строку статусом ОТМЕНЕНО (столбец G)
+                for (_, rownum) in rows:
+                    try:
+                        self.sc.update_cell(ws_title, f"G{rownum}", "ОТМЕНЕНО")
+                    except Exception:
+                        log.exception("Failed to mark canceled row %s in %s", rownum, ws_title)
+
+                # подготовим сообщение пользователю
+                first_row = rows[0][0] if rows else None
+                date = first_row[0] if first_row and len(first_row) > 0 else ""
+                shift = first_row[1] if first_row and len(first_row) > 1 else ""
+                ts = first_row[5] if first_row and len(first_row) > 5 else ""
                 user_msg = (
-                    f"❌ <b>Запись отменена</b>\n\n"
+                    f"❌ <b>Сессия отменена</b>\n\n"
                     f"Дата: {date}\n"
                     f"Смена: {shift}\n"
-                    f"Продукция: {product}\n"
-                    f"Количество: {qty}\n"
-                    f"\nОтменил: {user['fio']}"
+                    f"Время отправки: {ts}\n"
+                    f"Отменено позиций: {len(rows)}\n\n"
+                    f"Отменил: {user['fio']}"
                 )
                 tg_send(chat, user_msg, FLOW_MENU_KB)
-                # notify controllers
+
+                # уведомим контролёров с деталями
                 ctrl_sheet = CTRL_RF_SHEET if ws_title == RF_SHEET else CTRL_PPI_SHEET
                 ctrl_msg = (
-                    f"⚠️ <b>ОТМЕНЕНА ЗАПИСЬ</b>\n\n"
+                    f"⚠️ <b>ОТМЕНЕНА СЕССИЯ</b>\n\n"
                     f"Лист: {ws_title}\n"
                     f"Дата: {date}\n"
                     f"Смена: {shift}\n"
-                    f"Продукция: {product}\n"
-                    f"Количество: {qty}\n"
-                    f"\nОтменил: {user['fio']}"
+                    f"Время отправки: {ts}\n"
+                    f"Отменено позиций: {len(rows)}\n\n"
+                    "Позиции:\n"
                 )
+                for r, _ in rows:
+                    prod = r[2] if len(r) > 2 else ""
+                    qty = r[3] if len(r) > 3 else ""
+                    ctrl_msg += f"• {prod} — {qty}\n"
+
+                ctrl_msg += f"\nОтменил: {user['fio']}"
+
                 for cid in get_controllers_cached(ctrl_sheet):
                     try:
                         tg_send(cid, ctrl_msg)
                     except Exception:
                         pass
+
                 st["cancel_used"] = True
                 st.pop("pending_cancel", None)
                 return
+
 
             if text == "Нет, оставить":
                 tg_send(chat, "Запись сохранена.", FLOW_MENU_KB)
